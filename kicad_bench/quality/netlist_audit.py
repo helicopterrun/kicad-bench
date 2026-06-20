@@ -48,6 +48,18 @@ def audit(sch: Path, expect: dict[str, int] | None) -> Result:
     return res
 
 
+def emit_baseline(sch: Path, dest: Path) -> int:
+    """Write {net: node_count} from the current netlist as a regression baseline."""
+    counts, _ = cli.netlist_nets(sch)
+    baseline = {n: len(counts[n]) for n in sorted(counts)
+                if n and not n.startswith("unconnected-")}
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(json.dumps(baseline, indent=2) + "\n")
+    print(f"✓ wrote baseline of {len(baseline)} nets -> {dest}")
+    print("  point contracts.expected_nets at this file to make the audit assert.")
+    return 0
+
+
 def run(args) -> int:
     cfg = cfgmod.load_or_exit(args.config)
     sch = Path(args.schematic) if args.schematic else cfg.root_sch
@@ -55,6 +67,14 @@ def run(args) -> int:
         sys.exit("error: no schematic given and no project.root_sch in config")
     if not Path(sch).exists():
         sys.exit(f"error: schematic not found: {sch}")
+    if args.emit_baseline:
+        dest = Path(args.emit_baseline)
+        if dest.is_dir() or str(dest).endswith("/"):
+            dest = dest / f"{cfg.path.stem}.expected_nets.json"
+        try:
+            return emit_baseline(Path(sch), dest)
+        except cli.KicadCliError as e:
+            sys.exit(f"error: {e}")
     expect = cfg.expected_nets
     if args.expect:
         expect = json.loads(Path(args.expect).read_text())
@@ -69,5 +89,8 @@ def add_parser(sub):
     p = sub.add_parser("netlist-audit", help="per-net node-count audit (catches GND merges)")
     p.add_argument("schematic", nargs="?", help="sheet to check (default: project.root_sch)")
     p.add_argument("--expect", help="override: JSON {net: count}")
+    p.add_argument("--emit-baseline", metavar="PATH",
+                   help="write current node counts as a baseline JSON, then exit "
+                        "(a dir/trailing-slash auto-names <config>.expected_nets.json)")
     p.add_argument("--config", help=f"path to {cfgmod.CONFIG_NAME}")
     p.set_defaults(func=run)

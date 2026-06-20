@@ -23,6 +23,7 @@ Same as kicad-quality-gate: `kb` + `kicad-cli` + a `kicad-bench.toml`. For LVDS 
 | Situation | Command |
 |---|---|
 | "Which nets actually have a class, and what's the gap?" | `kb netclass-coverage --config CFG` |
+| "Generate the net classes/assignments from the plan" | `kb netclass-sync --config CFG [--write]` |
 | "Is the design ready to push into layout?" | `kb dfm-preflight --config CFG` |
 | "What board-setup values should I enter?" | `kb stackup-sync --config CFG [--emit]` |
 | "Is this .kicad_dru valid?" | `kb dru-lint [path] --config CFG` |
@@ -40,6 +41,11 @@ Same as kicad-quality-gate: `kb` + `kicad-cli` + a `kicad-bench.toml`. For LVDS 
   do nothing until copied there. Validate that file first with `dru-lint`.
 - **dru-lint**: static-checks a `.kicad_dru` (no `kicad-cli` validator exists; KiCad
   silently drops a malformed one). Run it before copying generated rules into place.
+- **netclass-sync**: closes the netclass-coverage gap — generates classes +
+  net→class assignments from the planning config. Default emits a fragment to
+  `output/`; `--write` merges into `.kicad_pro` (backs up `.bak`, keeps existing
+  classes). Never writes `.kicad_sch`/`.kicad_pcb`. Skips planned nets not in the
+  netlist (surfaces plan-vs-netlist naming drift).
 - **stackup-sync**: emit-and-apply. It prints the recommended Board Setup values and
   diffs them against the project; `--emit` writes `output/board_setup_guide.md`. It
   does **not** write the `.kicad_pcb` — enter the values in KiCad yourself.

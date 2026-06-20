@@ -35,7 +35,9 @@ read-only and exit non-zero on a real problem, so they compose and gate commits.
   `ERROR` lines fail. If a violation you believe is benign shows as `ERROR`, the fix
   is to add a justified `[[erc.allow]]` entry — never to silence it without a reason.
 - **netlist-audit**: needs `contracts.expected_nets` (a `{net: count}` baseline) to
-  assert; with none it just dumps node counts so you can build that baseline.
+  assert; with none it just dumps node counts. Build the baseline from a known-good
+  state with `kb netlist-audit --emit-baseline <dir-or-path>`, then point
+  `contracts.expected_nets` at it (resolved relative to the config file).
 - **block-review**: net-name findings flag labels that are *close to but not exactly*
   a contract net (the silent-rewire bug); designator findings flag refs outside the
   block's reserved range.

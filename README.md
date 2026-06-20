@@ -1,5 +1,7 @@
 # kicad-bench
 
+[![tests](https://github.com/helicopterrun/kicad-bench/actions/workflows/test.yml/badge.svg)](https://github.com/helicopterrun/kicad-bench/actions/workflows/test.yml)
+
 A generic, config-driven **KiCad-10 workflow & PCB-design workbench**: read-first
 quality gates and layout/DFM prep that wrap the noisy, manual, error-prone steps of
 schematic→BOM→layout with guardrails. It complements design-*generation* tooling
@@ -92,18 +94,22 @@ label stub can get silently absorbed so a net like `VCOM` ends up merged into `G
 The pins still connect to *something*, so ERC is happy — but the net is wrong.
 
 **What it does.** Exports the netlist and compares every named net's node count
-against an expected baseline (`contracts.expected_nets`, a `{net: count}` JSON map).
-A mismatch, or an expected net missing from the netlist entirely, is an error. With
-no baseline configured it just prints the node-count table — which is how you *build*
-the baseline the first time. Generalizes `validate_sheet.py --expect`.
+against an expected baseline (`contracts.expected_nets`, a `{net: count}` JSON map,
+resolved relative to the config file). A mismatch, or an expected net missing
+entirely, is an error. Generalizes `validate_sheet.py --expect`.
 
+Build the baseline once from a known-good state, then it becomes a regression gate:
 ```
-$ kb netlist-audit --config CFG          # no baseline -> dump
-  · AVDD: 9 nodes   C33.1, C38.1, C39.1, C40.1, D6.1, J2.27, R13.1, R19.1, U5.9
-  · GND: 146 nodes  ...
+$ kb netlist-audit --emit-baseline configs/ --config CFG    # writes <config>.expected_nets.json
+  ✓ wrote baseline of 109 nets
+
+$ kb netlist-audit --config CFG                              # now ASSERTS
+  ✓ GND: 146 nodes
+  ✗ VCOM: 0 nodes, expected 4        # or: ✗ VCOM: MISSING from netlist
+  -> PASS  0 mismatch(es) of 109 checked
 ```
-With a baseline, each line becomes `✓ GND: 146 nodes` or
-`✗ VCOM: 0 nodes, expected 4` / `✗ VCOM: MISSING from netlist`.
+With no baseline configured it just prints the node-count table. commit-gate runs
+this automatically once a baseline is set.
 
 ### `kb block-review <sheet>`
 
@@ -190,6 +196,34 @@ when planned-net coverage drops below `F`.
 > Pattern matching note: KiCad treats a pattern as **both** glob (`*`/`?`) **and**
 > regex simultaneously — so e.g. `X*` matches every net (regex zero-or-more). This
 > tool reproduces that behaviour faithfully (it's a documented KiCad footgun).
+
+### `kb netclass-sync`
+
+**Problem.** `netclass-coverage` shows the gap; this closes it. The planning config
+knows which nets belong to which power/bias/diff-pair domain, but the `.kicad_pro`
+has no classes assigned, so everything is Default.
+
+**What it does.** Generates a `net_settings` block from the planning config — one
+class per domain/diff-pair (clearance, track width, via size/drill, diff-pair
+gap/width straight from the config) plus an **exact** `netclass_assignments` map
+(net → [class], no wildcard ambiguity), only for nets that actually exist in the
+netlist (planned-but-absent nets are reported and skipped). By default it writes the
+fragment to `output/netclass_settings.json` and leaves the project untouched.
+`--write` **merges** it into the `.kicad_pro` (keeping existing classes, adding new
+ones, setting assignments) after writing a `.bak` — it never touches `.kicad_sch`/
+`.kicad_pcb`.
+
+```
+$ kb netclass-sync --config CFG               # emit (safe)
+  · 9 class(es) from plan; 42 of 45 planned nets present and assignable
+  ! planned net not in netlist (skipped): VIN_3V3   # surfaces plan vs. netlist drift
+  -> wrote output/netclass_settings.json
+
+$ kb netclass-sync --config CFG --write       # merge into .kicad_pro (+ .bak)
+  ✓ added 8 class(es), set 42 net assignment(s)
+```
+After `--write`, also copy the generated `.kicad_dru` next to the board so custom
+rules apply (see the DRC note under `dfm-preflight`), and validate it with `dru-lint`.
 
 ### `kb dfm-preflight`
 
@@ -350,7 +384,8 @@ wrappers so Claude can drive the `kb` tools with the same guardrails.
 ```
 kicad_bench/core/      cli, schparse, config, kicad10, footprints, report
 kicad_bench/quality/   erc_triage, netlist_audit, block_review, commit_gate
-kicad_bench/layout/    netclass_coverage, dfm_preflight, stackup_sync, release_prep, dru_lint
+kicad_bench/layout/    netclass_coverage, netclass_sync, dfm_preflight, stackup_sync,
+                       release_prep, dru_lint
 configs/               per-project kicad-bench.toml files
 skills/                SKILL.md wrappers
 tests/                 pytest (pure logic, no kicad-cli needed)

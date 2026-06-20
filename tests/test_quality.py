@@ -140,3 +140,24 @@ def test_dru_lint_netclass_advisory(tmp_path):
     res = dru_lint.lint(p)
     assert res.passed  # advisory is a warning, not an error
     assert any("hasNetclass" in f.message for f in res.findings)
+
+
+# -- netclass-sync generator ---------------------------------------------
+from kicad_bench.layout import netclass_sync
+
+
+def test_netclass_sync_build():
+    fab = {"domains": {"PWR": {"track_width": 0.5, "via_diameter": 0.6,
+                              "via_drill": 0.3, "internal_clearance": 0.2}},
+           "nets": {"PWR": ["VIN", "V5"]},
+           "diff_pairs": {"LVDS": {"track_width": 0.11, "gap": 0.2, "members": ["LVDS_CLK"]}}}
+    present = {"VIN", "LVDS_CLK_P", "LVDS_CLK_N"}        # V5 planned but absent
+    classes, assignments, planned, missing = netclass_sync.build_settings(fab, present)
+    assert {c["name"] for c in classes} == {"PWR", "LVDS"}
+    assert assignments["VIN"] == ["PWR"]
+    assert assignments["LVDS_CLK_P"] == ["LVDS"] and assignments["LVDS_CLK_N"] == ["LVDS"]
+    assert "V5" in missing and "VIN" not in missing
+    pwr = next(c for c in classes if c["name"] == "PWR")
+    assert pwr["track_width"] == 0.5 and pwr["clearance"] == 0.2 and pwr["via_drill"] == 0.3
+    lvds = next(c for c in classes if c["name"] == "LVDS")
+    assert lvds["diff_pair_gap"] == 0.2 and lvds["diff_pair_width"] == 0.11

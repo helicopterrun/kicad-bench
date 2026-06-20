@@ -67,6 +67,7 @@ class Config:
     nets: set[str] = field(default_factory=set)
     designators: dict[str, set[str]] = field(default_factory=dict)
     expected_nets: dict[str, int] | None = None
+    expected_nets_path: Path | None = None
     allow_rules: list[AllowRule] = field(default_factory=list)
     fab_config: Path | None = None
     stackup: str | None = None
@@ -162,11 +163,13 @@ def load(config_path: Path) -> Config:
     for block, spec in contracts.get("designators", {}).items():
         cfg.designators[block] = _expand_designators(spec)
 
+    # expected_nets is a tooling artifact (a generated baseline), so it resolves
+    # relative to the CONFIG file's directory — not the design-repo root.
     exp = contracts.get("expected_nets")
     if exp:
-        ep = _resolve_path(root, exp)
-        if ep.exists():
-            cfg.expected_nets = json.loads(ep.read_text())
+        cfg.expected_nets_path = _resolve_path(config_path.resolve().parent, exp)
+        if cfg.expected_nets_path.exists():
+            cfg.expected_nets = json.loads(cfg.expected_nets_path.read_text())
 
     for entry in data.get("erc", {}).get("allow", []):
         if "reason" not in entry:
