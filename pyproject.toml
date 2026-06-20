@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kicad-bench"
+version = "0.1.0"
+description = "Generic, config-driven KiCad-10 workflow & PCB-design workbench (read-first quality gates + layout/DFM prep)."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "helicopterrun" }]
+# Stdlib-only core (tomllib, argparse, xml, re, subprocess). KiCad work is done by
+# shelling out to `kicad-cli`, so there is no hard dependency on kicad-sch-api here.
+dependencies = []
+
+[project.scripts]
+kb = "kicad_bench.main:main"
+
+[tool.setuptools.packages.find]
+include = ["kicad_bench*"]

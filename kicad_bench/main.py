@@ -1,0 +1,67 @@
+"""kicad-bench `kb` CLI entry point.
+
+Dispatches to the quality-gate (Priority 1) and layout/DFM (Priority 2) tools.
+Each tool module exposes `add_parser(subparsers)` registering its subcommand and a
+`run(args)` returning a process exit code.
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+
+from . import __version__
+from .core import cli
+from .quality import block_review, commit_gate, erc_triage, netlist_audit
+from .layout import dfm_preflight, netclass_coverage, release_prep, stackup_sync
+
+_TOOLS = [
+    erc_triage, netlist_audit, block_review, commit_gate,        # Priority 1
+    netclass_coverage, dfm_preflight, stackup_sync, release_prep,  # Priority 2
+]
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="kb",
+        description="kicad-bench — generic KiCad-10 workflow & PCB-design workbench.",
+    )
+    p.add_argument("--version", action="version", version=f"kicad-bench {__version__}")
+    sub = p.add_subparsers(dest="command", metavar="<command>")
+    for tool in _TOOLS:
+        tool.add_parser(sub)
+    # tiny diagnostics command
+    d = sub.add_parser("doctor", help="check the environment (kicad-cli, config)")
+    d.add_argument("--config", help="path to kicad-bench.toml")
+    d.set_defaults(func=_doctor)
+    return p
+
+
+def _doctor(args) -> int:
+    from .core import config as cfgmod
+    ok = True
+    if cli.have_kicad_cli():
+        print(f"✓ kicad-cli: {cli.version()}")
+    else:
+        print("✗ kicad-cli not found on PATH")
+        ok = False
+    found = cfgmod.find_config()
+    if args.config:
+        print(f"· config (explicit): {args.config}")
+    elif found:
+        print(f"✓ config: {found}")
+    else:
+        print("· no kicad-bench.toml found from cwd (pass --config)")
+    return 0 if ok else 2
+
+
+def main(argv=None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if not getattr(args, "func", None):
+        parser.print_help()
+        return 0
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
