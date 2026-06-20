@@ -10,6 +10,7 @@ toolchain-setup notes.
 """
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import tempfile
@@ -91,15 +92,36 @@ def netlist_nets(sch: str | Path) -> tuple[dict[str, list[str]], dict[tuple[str,
     return counts, pin_net
 
 
-def drc_report(pcb: str | Path) -> str:
-    """Run severity-error DRC on a .kicad_pcb and return the raw report text."""
+def drc_json(pcb: str | Path) -> dict:
+    """Run DRC with structured JSON output and return the parsed result.
+
+    Custom-rule loading (verified empirically on KiCad 10.0.3): `kicad-cli pcb drc`
+    DOES apply a project's custom design rules, but only from a file named
+    `<board>.kicad_dru` sitting NEXT TO the board (matching base name). There is no
+    CLI flag to point at an arbitrary path, and a DRU with a syntax error is
+    silently dropped (rules simply don't apply). Consequence for this project: the
+    rules emitted by gen_design_rules.py land in output/ (gitignored), so they are
+    NOT active until copied to `<project>.kicad_dru` next to the board.
+    Also note `--severity-error` filters the report to error-severity items only.
+    """
     _require()
-    with tempfile.NamedTemporaryFile(suffix=".rpt", delete=False) as f:
-        rpt = f.name
-    subprocess.run(
-        ["kicad-cli", "pcb", "drc", "--severity-error", "--output", rpt, str(pcb)],
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+        out = f.name
+    r = subprocess.run(
+        ["kicad-cli", "pcb", "drc", "--format", "json", "--severity-all",
+         "--output", out, str(pcb)],
         capture_output=True, text=True,
     )
-    text = Path(rpt).read_text()
-    Path(rpt).unlink(missing_ok=True)
-    return text
+    try:
+        data = json.loads(Path(out).read_text())
+    except (OSError, json.JSONDecodeError):
+        raise KicadCliError(f"DRC produced no parseable report:\n{r.stderr.strip()}")
+    finally:
+        Path(out).unlink(missing_ok=True)
+    return data
+
+
+def drc_violations(pcb: str | Path, severities=("error",)) -> list[dict]:
+    """Return DRC violations at the given severities (each: type/severity/description)."""
+    want = set(severities)
+    return [v for v in drc_json(pcb).get("violations", []) if v.get("severity") in want]

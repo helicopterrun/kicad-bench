@@ -65,7 +65,7 @@ def _check_3d(cfg: cfgmod.Config, res: Result) -> None:
         res.info("all project-footprint 3D models present")
 
 
-def _pcb_drc(cfg: cfgmod.Config, res: Result) -> None:
+def _pcb_drc(cfg: cfgmod.Config, res: Result, info: Result) -> None:
     if not cfg.pcb or not cfg.pcb.exists():
         res.info("no .kicad_pcb configured — DRC skipped")
         return
@@ -74,12 +74,22 @@ def _pcb_drc(cfg: cfgmod.Config, res: Result) -> None:
     if "(footprint " not in text:
         res.info("PCB has no placed footprints yet — DRC skipped (pre-layout)")
         return
-    report = cli.drc_report(cfg.pcb)
-    n = len(re.findall(r"^\[", report, re.M))
-    if n:
-        res.error(f"PCB DRC: {n} violation(s)")
+    errs = cli.drc_violations(cfg.pcb, ("error",))
+    warns = cli.drc_violations(cfg.pcb, ("warning",))
+    if errs:
+        for v in errs[:10]:
+            res.error(f"DRC [{v.get('type')}] {v.get('description')}")
+        if len(errs) > 10:
+            res.error(f"... and {len(errs) - 10} more DRC error(s)")
     else:
-        res.ok("PCB DRC clean")
+        res.ok(f"PCB DRC clean — 0 errors ({len(warns)} warning(s))")
+    # Custom rules are loaded only from <board>.kicad_dru next to the board.
+    dru = cfg.pcb.with_suffix(".kicad_dru")
+    if dru.exists():
+        info.info(f"custom rules active: {dru.name} found next to the board")
+    else:
+        info.warn(f"custom rules NOT active: no {dru.name} next to the board — "
+                  "rules generated into output/ aren't applied until copied here")
 
 
 def run(args) -> int:
@@ -109,16 +119,21 @@ def run(args) -> int:
     _pins_pads(root, cfg, hard)
 
     # 5. PCB DRC
-    _pcb_drc(cfg, hard)
+    _pcb_drc(cfg, hard, info)
 
     # 3. 3D models (info)
     _check_3d(cfg, info)
 
-    # 4. net-class coverage (info)
+    # 4. net-class coverage (info) — ACTUAL project assignment
+    fab_cfg = None
     if cfg.fab_config and cfg.fab_config.exists():
         fab_cfg = json.loads(cfg.fab_config.read_text())
-        cov_res, cov, total = netclass_coverage.coverage(sch, fab_cfg)
-        info.info(f"net-class: {cov}/{total} classed, {total - cov} fall to Default")
+    _, ncstats = netclass_coverage.analyze(sch, cfg, fab_cfg)
+    msg = (f"net-class: {ncstats['n_assigned']}/{ncstats['n_total']} on a non-Default "
+           f"class, {ncstats['n_default']} fall to Default")
+    if fab_cfg and ncstats["plan_gap"]:
+        msg += f"; {ncstats['plan_gap']} planned net(s) still unclassed"
+    info.info(msg)
 
     print(hard.render())
     print()

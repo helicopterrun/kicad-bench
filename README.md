@@ -80,6 +80,11 @@ error. If a violation you believe is benign shows as `✗`, the fix is to add a
 *justified* `[[erc.allow]]` entry — the loader refuses any allow-rule without a
 `reason`, so suppressions can never be silent.
 
+**Fail-safe.** The only violation *types* this tool can down-classify are
+`pin_not_connected` / `pin_not_driven` / `power_pin_not_driven` (plus any type named
+in an allow-rule). Every other type is treated as REAL and tagged "unmapped ERC type"
+— the tool never assumes silence for a violation class it doesn't understand.
+
 ### `kb netlist-audit [sheet]`
 
 **Problem.** Some wiring bugs are invisible to ERC. The classic one here: an L-shaped
@@ -156,21 +161,35 @@ outside `output/`).
 
 ### `kb netclass-coverage`
 
-**Problem.** A net with no explicit net class silently inherits KiCad's Default
-width — harmless for logic, dangerous for a 12 V power or panel-bias rail.
+**Problem.** A net with no class silently inherits KiCad's Default width — harmless
+for logic, dangerous for a 12 V power or panel-bias rail. Crucially, KiCad does *not*
+class nets from any planning document: it resolves each net's class from the
+project's `net_settings` (explicit `netclass_assignments`, else matching
+`netclass_patterns`, else Default). So "what the plan wants" and "what the board
+actually does" are two different things.
 
-**What it does.** Reads the actual netlist and the fab/design-rules JSON (the same
-`design_rules_config.json` the project's `gen_design_rules.py` consumes) and reports
-every real net not covered by a domain or diff-pair member list.
+**What it does.** Reports the **actual** per-net class as KiCad resolves it (a net is
+assigned to *every* matching pattern's class — KiCad applies all matches, not the
+first/last), then cross-references the planning config (`fab.config` domains) to
+surface the gap: nets the plan wants on a power/bias/diff-pair class but the project
+leaves on Default.
 
 ```
 $ kb netclass-coverage --config CFG
-  ! VSYNC: no explicit class (falls to Default)  [VSYNC]
-  · 44/107 nets explicitly classed
-  -> PASS  63 unclassed net(s) — assign a class or set the Default width before routing
+  · classes defined in project: Default, I2C, Power, SPI, USB
+  ! NO netclass patterns or assignments in the project — all 109 nets fall to Default
+  ! AVDD: plan wants 'BIAS' class, project leaves it on Default  [AVDD]
+  ! LVDS_CLK_P: plan wants 'diff-pair' class, project leaves it on Default  [LVDS_CLK_P]
+  ...
+  -> PASS  0/109 nets on a non-Default class; 109 on Default; 43 planned net(s) still unclassed
 ```
-Reporting only by default; `--strict --min-coverage F` makes it fail below fraction
-`F`. Generalizes `preflight_layout.check_netclass`.
+That is the real picture for this project today: classes are *defined* but **no
+patterns assign any net**, so everything is Default. `--strict --min-coverage F` fails
+when planned-net coverage drops below `F`.
+
+> Pattern matching note: KiCad treats a pattern as **both** glob (`*`/`?`) **and**
+> regex simultaneously — so e.g. `X*` matches every net (regex zero-or-more). This
+> tool reproduces that behaviour faithfully (it's a documented KiCad footgun).
 
 ### `kb dfm-preflight`
 
@@ -181,22 +200,33 @@ the show-stoppers, separating hard blockers from things merely worth knowing.
 **informational** section:
 - *Hard (fails the command):* real ERC errors; any symbol with **more pins than its
   footprint has pads** (a "update PCB from schematic" blocker); PCB DRC errors (only
-  if the board actually has placed footprints).
-- *Informational:* missing 3D models; net-class coverage summary.
+  if the board has placed footprints).
+- *Informational:* missing 3D models; net-class coverage summary; whether the
+  project's custom rules are actually active (see the DRC note below).
 
 ```
 $ kb dfm-preflight --config CFG
 == DFM preflight ==
   ✓ ERC clean (real errors)
   ✓ no symbol exceeds its footprint pads
-  ✓ PCB DRC clean
+  ✓ PCB DRC clean — 0 errors (14 warning(s))
   -> PASS  no problems
 == DFM preflight (informational) ==
+  ! custom rules NOT active: no Example Board.kicad_dru next to the board —
+    rules generated into output/ aren't applied until copied here
   · all project-footprint 3D models present
-  · net-class: 44/107 classed, 63 fall to Default
+  · net-class: 0/109 on a non-Default class, 109 fall to Default; 43 planned net(s) still unclassed
 == DFM preflight: PASS ==
 ```
-Generalizes `preflight_layout.py` and adds the PCB DRC pass.
+Generalizes `preflight_layout.py` and adds the PCB DRC pass (parsed from `--format
+json`, counting error-severity violations).
+
+> **DRC + custom rules (verified on KiCad 10.0.3).** `kicad-cli pcb drc` *does* apply
+> a project's custom design rules — but only from a file named `<board>.kicad_dru`
+> sitting next to the board (matching base name), and only if it's syntactically
+> valid (a malformed DRU is silently dropped). This project generates its rules into
+> `output/` (gitignored), so they are **not active** until copied to
+> `Example Board/Example Board.kicad_dru`. dfm-preflight flags this explicitly.
 
 ### `kb stackup-sync`
 
@@ -235,6 +265,25 @@ $ kb release-prep --config CFG
   ✗ BOM: 7 row(s) still NEEDS-PN
       220nF | C103 | C_0402_1005Metric | Backlight; ...
   -> FAIL  NOT ready
+```
+
+### `kb dru-lint`
+
+**Problem.** KiCad applies custom rules only if the `.kicad_dru` is syntactically
+valid — but it drops a malformed file *silently*, and there is no `kicad-cli` command
+to validate one (only a GUI "Check Rule Syntax" button). So a typo in a generated DRU
+means your rules just quietly don't apply.
+
+**What it does.** Static-checks a `.kicad_dru`: `(version 1)` header, balanced parens,
+every `(constraint …)` against the KiCad 10 constraint set, every `(severity …)`
+against `error/warning/ignore/exclusion`, rules-without-constraints, and an advisory
+to prefer `A.hasNetclass('X')` over `A.NetClass == 'X'`. Defaults to the project's
+sibling `<board>.kicad_dru` or the generated `output/*_design_rules.kicad_dru`.
+
+```
+$ kb dru-lint --config CFG
+== DRU lint: Example Board_design_rules.kicad_dru ==
+  -> PASS  41 rule(s), 44 constraint(s); 0 error(s)
 ```
 
 ### `kb doctor`
@@ -301,7 +350,7 @@ wrappers so Claude can drive the `kb` tools with the same guardrails.
 ```
 kicad_bench/core/      cli, schparse, config, kicad10, footprints, report
 kicad_bench/quality/   erc_triage, netlist_audit, block_review, commit_gate
-kicad_bench/layout/    netclass_coverage, dfm_preflight, stackup_sync, release_prep
+kicad_bench/layout/    netclass_coverage, dfm_preflight, stackup_sync, release_prep, dru_lint
 configs/               per-project kicad-bench.toml files
 skills/                SKILL.md wrappers
 tests/                 pytest (pure logic, no kicad-cli needed)

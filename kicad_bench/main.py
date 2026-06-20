@@ -12,11 +12,11 @@ import sys
 from . import __version__
 from .core import cli
 from .quality import block_review, commit_gate, erc_triage, netlist_audit
-from .layout import dfm_preflight, netclass_coverage, release_prep, stackup_sync
+from .layout import dfm_preflight, dru_lint, netclass_coverage, release_prep, stackup_sync
 
 _TOOLS = [
     erc_triage, netlist_audit, block_review, commit_gate,        # Priority 1
-    netclass_coverage, dfm_preflight, stackup_sync, release_prep,  # Priority 2
+    netclass_coverage, dfm_preflight, stackup_sync, release_prep, dru_lint,  # Priority 2
 ]
 
 

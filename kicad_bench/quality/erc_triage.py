@@ -11,6 +11,13 @@ ALLOWED buckets (all carry a reason in the report):
 Everything else is REAL and fails. The classification logic (1)+(2) mirrors the
 project's validate_sheet.py so behaviour is identical; (3) is the config layer.
 
+IMPORTANT — fail-safe by design: the only violation TYPES this tool has any
+down-classification logic for are pin_not_connected / pin_not_driven /
+power_pin_not_driven, plus any type named in an [[erc.allow]] rule. Every OTHER
+violation type is treated as REAL — silence is never assumed for a type the tool
+doesn't understand. Such findings are tagged "unmapped ERC type" so it's visible
+that no triage logic ran on them.
+
 Read-only. Exits 0 if no REAL errors, 1 otherwise.
 """
 from __future__ import annotations
@@ -26,12 +33,19 @@ from ..core.report import Result, render_and_exit
 _BLOCK = re.compile(r"\[(\w+)\]:\s*(.+?)\n(?:\s*;.*\n)?\s*@\(([^)]*)\):\s*(.+)")
 _SYMPIN = re.compile(r"Symbol\s+(\S+)\s+Pin\s+(\S+)")
 
+# Violation types this tool has down-classification logic for. Anything outside
+# this set (plus types named in allow-rules) can only ever be REAL — see module
+# docstring. Surfaced per-finding so "treated as real" is never silent.
+_MAPPED_TYPES = {"pin_not_connected", "pin_not_driven", "power_pin_not_driven"}
+
 
 def triage(sch: Path, pin_net: dict, in_nets: set, allow_rules: list,
            report: str | None = None) -> Result:
     res = Result(f"ERC triage: {sch.name}")
     if report is None:
         report = cli.erc_report(sch)
+    mapped = _MAPPED_TYPES | {r.type for r in allow_rules if r.type != "*"}
+    unmapped_types: set[str] = set()
     n_total = 0
     for vtype, msg, loc, where in _BLOCK.findall(report):
         n_total += 1
@@ -65,12 +79,16 @@ def triage(sch: Path, pin_net: dict, in_nets: set, allow_rules: list,
             res.allowed(line, whereloc, f"partial-build: net {net} is a hier input (driven by parent)")
         elif rule:
             res.allowed(line, whereloc, f"allow-rule: {rule.reason}")
+        elif vtype not in mapped:
+            unmapped_types.add(vtype)
+            res.error(line, whereloc, "unmapped ERC type — no triage logic; treated as REAL")
         else:
             res.error(line, whereloc)
 
     n_allowed = sum(1 for f in res.findings if f.severity == "allowed")
     if res.n_errors:
-        res.summary = f"{res.n_errors} real, {n_allowed} allowed (of {n_total})"
+        extra = f"; {len(unmapped_types)} unmapped type(s)" if unmapped_types else ""
+        res.summary = f"{res.n_errors} real, {n_allowed} allowed (of {n_total}){extra}"
     else:
         res.summary = f"ERC clean — {n_allowed} allowed partial-build/known exception(s)"
     return res

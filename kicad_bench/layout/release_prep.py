@@ -15,7 +15,6 @@ Exit 0 if releasable (or exported), 1 if not ready, 2 on setup error.
 """
 from __future__ import annotations
 
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -62,12 +61,12 @@ def readiness(cfg: cfgmod.Config) -> tuple[bool, Result, bool]:
     if not laid_out:
         res.warn("PCB not laid out yet — gerber export will be skipped")
     else:
-        report = cli.drc_report(cfg.pcb)
-        n = len(re.findall(r"^\[", report, re.M))
-        if n:
-            res.error(f"PCB DRC: {n} violation(s)")
+        errs = cli.drc_violations(cfg.pcb, ("error",))
+        if errs:
+            res.error(f"PCB DRC: {len(errs)} error(s)",
+                      detail="; ".join(v.get("type", "") for v in errs[:6]))
         else:
-            res.ok("PCB DRC clean")
+            res.ok("PCB DRC clean (0 errors)")
 
     # BOM
     if cfg.bom and cfg.bom.exists():

@@ -22,18 +22,24 @@ Same as kicad-quality-gate: `kb` + `kicad-cli` + a `kicad-bench.toml`. For LVDS 
 
 | Situation | Command |
 |---|---|
-| "Which nets still need a net class?" | `kb netclass-coverage --config CFG` |
+| "Which nets actually have a class, and what's the gap?" | `kb netclass-coverage --config CFG` |
 | "Is the design ready to push into layout?" | `kb dfm-preflight --config CFG` |
 | "What board-setup values should I enter?" | `kb stackup-sync --config CFG [--emit]` |
+| "Is this .kicad_dru valid?" | `kb dru-lint [path] --config CFG` |
 | "Export fab files (if releasable)" | `kb release-prep --config CFG [--export]` |
 
 ## How to interpret results
-- **netclass-coverage**: every `!` net inherits the Default class width — fine for
-  logic, risky for power/bias. Assign a class (see the project's net-class guide) or
-  set a safe Default before routing. `--strict --min-coverage F` fails below F.
+- **netclass-coverage**: reports each net's ACTUAL class as KiCad resolves it from the
+  project's `net_settings` (patterns/assignments), not from any planning doc. A net on
+  Default inherits the Default width — fine for logic, risky for power/bias. The
+  "plan wants X, project leaves on Default" lines are the gap to close before routing.
 - **dfm-preflight**: the **hard** block fails on real ERC errors, any symbol with
   more pins than its footprint has pads, or PCB DRC errors. The **informational**
-  block (3D models, net-class) never fails but is worth reading.
+  block also flags whether custom rules are *active*: `kicad-cli pcb drc` only loads
+  a `<board>.kicad_dru` sitting next to the board, so rules generated into `output/`
+  do nothing until copied there. Validate that file first with `dru-lint`.
+- **dru-lint**: static-checks a `.kicad_dru` (no `kicad-cli` validator exists; KiCad
+  silently drops a malformed one). Run it before copying generated rules into place.
 - **stackup-sync**: emit-and-apply. It prints the recommended Board Setup values and
   diffs them against the project; `--emit` writes `output/board_setup_guide.md`. It
   does **not** write the `.kicad_pcb` — enter the values in KiCad yourself.

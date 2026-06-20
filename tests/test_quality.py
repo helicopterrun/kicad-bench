@@ -3,6 +3,7 @@ from pathlib import Path
 
 from kicad_bench.core.config import AllowRule
 from kicad_bench.quality import erc_triage, netlist_audit
+from kicad_bench.layout import netclass_coverage as ncc
 
 
 SCH = Path("power_bias.kicad_sch")
@@ -41,6 +42,17 @@ def test_triage_classifies():
     assert u4.severity == "allowed" and "hier input" in u4.detail
 
 
+def test_triage_unmapped_type_is_real():
+    # A violation type with no triage logic must be REAL and tagged, never silent.
+    report = ("[lib_symbol_mismatch]: Symbol doesn't match library\n"
+              "    @(10 mm, 10 mm): Symbol U1\n")
+    res = erc_triage.triage(SCH, {}, set(), [], report=report)
+    assert res.n_errors == 1
+    f = res.findings[0]
+    assert f.severity == "error" and "unmapped ERC type" in f.detail
+    assert "unmapped type" in res.summary
+
+
 def test_triage_clean_when_only_allowed():
     pin_net = {("U5", "7"): "GND"}
     allow = [AllowRule(reason="x", type="power_pin_not_driven", ref="U5", pin="7")]
@@ -59,3 +71,72 @@ def test_netlist_audit(monkeypatch):
     assert not res.passed
     missing = next(f for f in res.findings if f.where == "MISSING")
     assert "MISSING from netlist" in missing.message
+
+
+# -- netclass resolution (KiCad net_settings semantics) ------------------
+# KiCad 10: a net is assigned to EVERY matching pattern's class (not last-wins),
+# patterns match as glob OR regex, and netclass_assignments map net -> [classes].
+def test_resolve_classes_default_when_unmatched():
+    assert ncc.resolve_classes("ANYTHING", {}) == set()        # only implicit Default
+
+
+def test_resolve_classes_pattern_glob():
+    s = {"netclass_patterns": [{"pattern": "VCC*", "netclass": "Power"}]}
+    assert ncc.resolve_classes("VCC3V3", s) == {"Power"}
+    assert ncc.resolve_classes("GND", s) == set()
+
+
+def test_resolve_classes_explicit_assignment_is_a_list():
+    # netclass_assignments maps a full net name -> LIST of class strings.
+    s = {"netclass_assignments": {"SCL": ["I2C"], "SDA": ["I2C", "Sense"]}}
+    assert ncc.resolve_classes("SCL", s) == {"I2C"}
+    assert ncc.resolve_classes("SDA", s) == {"I2C", "Sense"}
+    assert ncc.resolve_classes("OTHER", s) == set()
+
+
+def test_pattern_regex_zero_or_more_footgun():
+    # Faithful to KiCad: a pattern is glob OR regex, so 'X*' (regex: zero-or-more X)
+    # matches every net. Documented KiCad behaviour, reproduced deliberately.
+    s = {"netclass_patterns": [{"pattern": "X*", "netclass": "Power"}]}
+    assert ncc.resolve_classes("SCL", s) == {"Power"}     # matches via regex empty-match
+
+
+def test_resolve_classes_all_matching_apply():
+    # A net matching two patterns gets BOTH classes (KiCad 9/10 behaviour).
+    s = {"netclass_patterns": [
+        {"pattern": "USB_*", "netclass": "USBpwr"},
+        {"pattern": "USB_D*", "netclass": "USBdiff"},
+    ]}
+    assert ncc.resolve_classes("USB_DP", s) == {"USBpwr", "USBdiff"}
+
+
+# -- dru-lint ------------------------------------------------------------
+from kicad_bench.layout import dru_lint
+
+
+def test_dru_lint_clean(tmp_path):
+    p = tmp_path / "ok.kicad_dru"
+    p.write_text('(version 1)\n(rule "r" (constraint track_width (min 0.2mm)) '
+                 '(condition "A.NetName == \'X\'"))\n')
+    res = dru_lint.lint(p)
+    assert res.passed and res.n_errors == 0
+
+
+def test_dru_lint_catches_errors(tmp_path):
+    p = tmp_path / "bad.kicad_dru"
+    # bad version (warn), unknown constraint (err), unknown severity (err), unbalanced (err)
+    p.write_text('(version 2)\n(rule "r" (severity bogus) '
+                 '(constraint not_real (min 1mm))\n')
+    res = dru_lint.lint(p)
+    assert not res.passed
+    msgs = " ".join(f.message for f in res.findings)
+    assert "not_real" in msgs and "bogus" in msgs and "unbalanced" in msgs
+
+
+def test_dru_lint_netclass_advisory(tmp_path):
+    p = tmp_path / "nc.kicad_dru"
+    p.write_text('(version 1)\n(rule "r" (constraint clearance (min 1mm)) '
+                 '(condition "A.NetClass == \'Power\'"))\n')
+    res = dru_lint.lint(p)
+    assert res.passed  # advisory is a warning, not an error
+    assert any("hasNetclass" in f.message for f in res.findings)
