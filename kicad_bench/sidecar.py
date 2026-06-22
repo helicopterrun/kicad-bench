@@ -66,6 +66,13 @@ PAGE = """<!doctype html>
   .sev-info .badge{background:#1e2a38;color:var(--info)}
   .where{color:var(--muted)} .detail{color:var(--muted);font-size:12px;padding-left:49px}
   #loading{color:var(--muted);padding:8px 0}
+  nav#tabs{position:sticky;top:0;z-index:4;display:flex;gap:2px;background:#101113;
+           border-bottom:1px solid var(--line);padding:0 10px}
+  nav#tabs button{background:transparent;border:0;border-bottom:2px solid transparent;border-radius:0;
+           color:var(--muted);padding:9px 14px;font-weight:600}
+  nav#tabs button:hover{background:#1b1c1f;color:var(--fg)}
+  nav#tabs button.active{color:var(--fg);border-bottom-color:var(--info)}
+  iframe#docframe{display:none;width:100%;border:0;background:#fff}
 </style></head>
 <body>
 <header>
@@ -73,15 +80,19 @@ PAGE = """<!doctype html>
   <span class="pill" id="verdict">…</span>
   <span class="spacer"></span>
   <span class="muted" id="updated"></span>
-  <label><input type="checkbox" id="issuesOnly"> issues only</label>
-  <label><input type="checkbox" id="auto" checked> auto</label>
-  <button id="rerun">Re-run</button>
+  <span id="auditctl">
+    <label><input type="checkbox" id="issuesOnly"> issues only</label>
+    <label><input type="checkbox" id="auto" checked> auto</label>
+    <button id="rerun">Re-run</button>
+  </span>
 </header>
-<main>
+<nav id="tabs"></nav>
+<main id="auditview">
   <div id="loading">running audit…</div>
   <div class="fixnext" id="fixnext" style="display:none"></div>
   <div id="sections"></div>
 </main>
+<iframe id="docframe" title="guide"></iframe>
 <script>
 let lastMtime=null, busy=false;
 const $=id=>document.getElementById(id);
@@ -146,9 +157,34 @@ async function poll(){
     if(lastMtime!==null && m!==lastMtime){ loadAudit(false); }
   }catch(e){}
 }
+// ---- tabs: Audit dashboard + project doc guides (served from /doc/<i>) ----
+let docSrc=null;
+function sizeFrame(){ const f=$("docframe");
+  if(f.style.display!=="none") f.style.height=(window.innerHeight-f.getBoundingClientRect().top)+"px"; }
+function switchTab(kind,i,btn){
+  document.querySelectorAll("#tabs button").forEach(b=>b.classList.remove("active"));
+  if(btn) btn.classList.add("active");
+  const isAudit=(kind==="audit"), f=$("docframe");
+  $("auditview").style.display=isAudit?"block":"none";
+  $("auditctl").style.display=isAudit?"":"none";
+  if(isAudit){ f.style.display="none"; }
+  else{ const src="/doc/"+i; if(docSrc!==src){ f.src=src; docSrc=src; } f.style.display="block"; sizeFrame(); }
+}
+async function loadTabs(){
+  let tabs=[]; try{ tabs=await (await fetch("/api/tabs")).json(); }catch(e){}
+  const nav=$("tabs"); nav.innerHTML="";
+  const mk=(label,kind,i)=>{ const b=document.createElement("button"); b.textContent=label;
+    b.onclick=()=>switchTab(kind,i,b); nav.appendChild(b); return b; };
+  mk("Audit","audit",null).classList.add("active");
+  tabs.forEach((t,i)=>mk(t.title,"doc",i));
+  if(!tabs.length) nav.style.display="none";
+}
+window.addEventListener("resize",sizeFrame);
+
 $("rerun").onclick=()=>loadAudit(true);
 $("issuesOnly").onchange=()=>loadAudit(false);
 setInterval(poll,3000);
+loadTabs();
 loadAudit(false);
 </script>
 </body></html>"""
@@ -196,6 +232,17 @@ def _make_handler(state: _State):
             elif path == "/api/audit":
                 data = state.audit("force=1" in self.path)
                 self._send(200, json.dumps(data).encode(), "application/json")
+            elif path == "/api/tabs":
+                tabs = [{"title": t.title} for t in state.cfg.sidecar_tabs]
+                self._send(200, json.dumps(tabs).encode(), "application/json")
+            elif path.startswith("/doc/"):
+                try:
+                    tab = state.cfg.sidecar_tabs[int(path[len("/doc/"):])]
+                except (ValueError, IndexError):
+                    self._send(404, b"no such doc tab", "text/plain"); return
+                if not tab.path.exists():
+                    self._send(404, f"guide file missing: {tab.path}".encode(), "text/plain"); return
+                self._send(200, tab.path.read_bytes(), "text/html; charset=utf-8")
             else:
                 self._send(404, b"not found", "text/plain")
 

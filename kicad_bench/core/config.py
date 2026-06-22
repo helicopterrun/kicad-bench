@@ -57,6 +57,14 @@ class AllowRule:
 
 
 @dataclass
+class SidecarTab:
+    """An extra HTML page the sidecar serves as a tab (project docs/guides).
+    `path` is absolute; resolved relative to the project root."""
+    title: str
+    path: Path
+
+
+@dataclass
 class Config:
     path: Path
     root: Path                              # project root (config dir)
@@ -71,6 +79,7 @@ class Config:
     allow_rules: list[AllowRule] = field(default_factory=list)
     fab_config: Path | None = None
     stackup: str | None = None
+    sidecar_tabs: list[SidecarTab] = field(default_factory=list)
     raw: dict = field(default_factory=dict)
 
     def block_for_designator(self, ref: str) -> str | None:
@@ -189,6 +198,13 @@ def load(config_path: Path) -> Config:
     if "config" in fab:
         cfg.fab_config = _resolve_path(root, fab["config"])
     cfg.stackup = fab.get("stackup")
+
+    # Sidecar doc tabs — project HTML guides shown alongside the audit dashboard.
+    # `file` resolves relative to the project root (they live with the design).
+    for tab in data.get("sidecar", {}).get("tabs", []):
+        title, fname = tab.get("title"), tab.get("file")
+        if title and fname:
+            cfg.sidecar_tabs.append(SidecarTab(title=title, path=_resolve_path(root, fname)))
 
     return cfg
 
