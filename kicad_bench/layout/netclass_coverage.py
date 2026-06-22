@@ -29,6 +29,11 @@ from ..core.report import Result
 DEFAULT_CLASS = "Default"
 
 
+def pcbgeom_leaf(net: str) -> str:
+    """Last path component of a net name ('/video/TMDS_CLK_P' -> 'TMDS_CLK_P')."""
+    return net.rsplit("/", 1)[-1]
+
+
 def read_net_settings(cfg: cfgmod.Config) -> dict:
     """Pull net_settings (classes, patterns, assignments) from the .kicad_pro."""
     pro = None
@@ -81,9 +86,17 @@ def resolve_classes(net: str, settings: dict) -> set[str]:
 
 
 def real_nets(sch: Path) -> list[str]:
-    counts, _ = cli.netlist_nets(sch)
-    return sorted(n.split("/")[-1] for n in counts
-                  if n and not n.startswith("unconnected-"))
+    """Net names exactly as KiCad stores them — full hierarchical path with the leading
+    '/' kept for sheet nets, bare for globals (e.g. '/VGH', '/video/TMDS_CLK_P', 'GND').
+    This is the string KiCad matches `netclass_patterns` against, so resolution must use
+    it (NOT the leaf — '/VGH' does not match a leaf of 'VGH')."""
+    root = cli.netlist_xml(sch)
+    out = set()
+    for net in root.iter("net"):
+        nm = net.get("name") or ""
+        if nm and "unconnected-" not in nm:
+            out.add(nm)
+    return sorted(out)
 
 
 def analyze(sch: Path, cfg: cfgmod.Config, fab_cfg: dict | None):
@@ -95,8 +108,8 @@ def analyze(sch: Path, cfg: cfgmod.Config, fab_cfg: dict | None):
     nets = real_nets(sch)
     by_class: dict[str, list[str]] = {}
     for n in nets:
-        classes = resolve_classes(n, settings)
-        key = ", ".join(sorted(classes)) if classes else DEFAULT_CLASS
+        ncls = resolve_classes(n, settings)          # resolve on the FULL net name
+        key = ", ".join(sorted(ncls)) if ncls else DEFAULT_CLASS
         by_class.setdefault(key, []).append(n)
     n_default = len(by_class.get(DEFAULT_CLASS, []))
     n_assigned = len(nets) - n_default
@@ -124,10 +137,13 @@ def analyze(sch: Path, cfg: cfgmod.Config, fab_cfg: dict | None):
             for base in spec.get("members", []):
                 for nm in (f"{base}_P", f"{base}_N", f"{base}P", f"{base}N"):
                     plan_class[nm] = "diff-pair"
-        present = set(nets)
-        for net, dom in sorted(plan_class.items()):
-            if net in present and not resolve_classes(net, settings):
-                plan_gap.append((net, dom))
+        # plan names are short (e.g. 'VGH', 'LVDS_CLK_P'); board nets are full paths —
+        # match by leaf, then resolve on the FULL name to get the actual class.
+        present_by_leaf = {pcbgeom_leaf(n): n for n in nets}
+        for short, dom in sorted(plan_class.items()):
+            full = present_by_leaf.get(short)
+            if full and not resolve_classes(full, settings):
+                plan_gap.append((short, dom))
         for net, dom in plan_gap:
             res.warn(f"{net}: plan wants '{dom}' class, project leaves it on {DEFAULT_CLASS}", net)
 

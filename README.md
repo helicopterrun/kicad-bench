@@ -41,7 +41,11 @@ tools compose and drop straight into CI or a git hook.
 
 # The tools
 
-Eight commands in two groups. Each section below says *what problem it solves*, *what
+Sixteen commands. **`kb audit`** runs all the read-only checks below at once (sharing one
+netlist export and one DRC run) and prints a consolidated whole-repo report — start there;
+the individual commands are for targeted checks. **`kb sidecar`** serves the same audit as a
+live web dashboard to keep open beside KiCad (it re-audits when you save the board). Each
+section below says *what problem it solves*, *what
 it actually does*, and *how to read the output*. Examples are real runs against the
 Example Board project.
 
@@ -320,6 +324,72 @@ $ kb dru-lint --config CFG
   -> PASS  41 rule(s), 44 constraint(s); 0 error(s)
 ```
 
+## Priority 3 — routed-geometry audits (read-only)
+
+These read the actual track/via/zone geometry from the `.kicad_pcb` (via
+`core/pcbgeom`, the one place that parses board copper) and check what `kicad-cli pcb
+drc` cannot: diff-pair length/skew, as-routed width vs per-domain floors, and routing
+completeness. All are read-only; the matching *writer* (`apply_track_widths.py`) lives
+in the design repo so this package stays read-first.
+
+### `kb diffpair-audit`
+
+**Problem.** DRC enforces a pair's gap/width *floor* but never reports the things that
+decide whether a 100 Ω / 90 Ω pair works: per-net routed length, intra-pair skew, the
+as-routed width, or whether the pair dropped to an inner/reference layer.
+
+**What it does.** For every pair in `fab.config` `diff_pairs`, reports len(P)/len(N),
+intra-pair skew, inter-pair bus spread, width vs target, layer (flags a pair not on a
+single outer layer), and via count. `--max-skew` / `--width-tol` / `--max-bus-spread`
+set the budgets; `--strict` exits 1 on any flagged pair.
+
+### `kb track-conformance`
+
+**Problem.** DRC has one global minimum track width; it can't say "this 12 V rail was
+routed below its 0.5 mm domain floor."
+
+**What it does.** Maps every routed net to its domain (from `fab.config`) and reports
+tracks/vias under floor, as a per-domain rollup. Respects copper *pours*: a poured power
+net with no thin discrete tracks is conformant, not "thin." `--strict` exits 1 on any
+under-floor copper.
+
+### `kb route-coverage`
+
+**Problem.** "How much is left to route?" normally means opening pcbnew.
+
+**What it does.** Counts KiCad's ratsnest (`unconnected_items` from DRC) per net and
+rolls it up by hierarchical block and by net class, and lists still-open diff pairs — a
+headless routing dashboard. `--strict` exits 1 if any routable net is still open.
+
+### `kb dru-guard`
+
+**Problem.** KiCad loads custom rules only from a `<board>.kicad_dru` sibling; copy it
+under the wrong name or let it drift from the config and DRC silently runs without the
+impedance/clearance rules.
+
+**What it does.** Verifies the board-sibling DRU exists, is current vs a fresh
+`gen_design_rules.py` run, passes `dru-lint`, that the `.kicad_pro` classes still cover
+the config's domains/diff-pairs, and that the stackup id is consistent. Flags a dead
+non-loading `<board>_design_rules.kicad_dru` sibling.
+
+### `kb sidecar`
+
+**Problem.** The audit is a terminal command; while routing you want it *glanceable* and
+*live*, not something you re-run by hand.
+
+**What it does.** Starts a tiny stdlib web server (no Flask) serving one self-contained
+dark dashboard: the verdict, a "fix next" list of every error, and every check with
+expandable findings. It watches the board's mtime and re-audits automatically when you save
+in KiCad, caching by mtime so extra tabs/polls don't trigger redundant DRC runs. Read-only.
+
+```
+$ kb sidecar --config CFG            # → http://127.0.0.1:8765
+$ kb sidecar --host 0.0.0.0 --port 9000
+```
+Runs wherever the board file and `kicad-cli` are: on the Mac it tracks live saves; on a
+headless server it reflects each `git pull`. The design repo's `scripts/sidecar.py` launches
+it no-arg.
+
 ### `kb doctor`
 
 Sanity check: confirms `kicad-cli` is on PATH and reports which config will be used.
@@ -374,6 +444,12 @@ kicad-bench *generalizes and consolidates* the per-project validators
 (`kicad_bench/core/`). The originals remain the source-of-truth references; the
 classification and resolution logic here is ported to match them.
 
+The Priority-3 geometry parser (`core/pcbgeom`) is shared the other direction too: the
+design repo's `scripts/audit.py` (a no-arg wrapper over `kb audit` for the whole repo) and
+`scripts/apply_track_widths.py` (the mutating writer that widens under-floor tracks) both
+import it. Read-only audits live here; the one writer lives there, so this package stays
+read-first.
+
 ## Skills
 
 `skills/kicad-quality-gate` and `skills/kicad-layout-prep` are thin SKILL.md
@@ -382,10 +458,13 @@ wrappers so Claude can drive the `kb` tools with the same guardrails.
 ## Layout
 
 ```
-kicad_bench/core/      cli, schparse, config, kicad10, footprints, report
+kicad_bench/audit.py   consolidated whole-repo audit (composes every check below)
+kicad_bench/sidecar.py live web dashboard of the audit (stdlib server + one HTML page)
+kicad_bench/core/      cli, schparse, config, kicad10, footprints, report, pcbgeom
 kicad_bench/quality/   erc_triage, netlist_audit, block_review, commit_gate
 kicad_bench/layout/    netclass_coverage, netclass_sync, dfm_preflight, stackup_sync,
-                       release_prep, dru_lint
+                       release_prep, dru_lint,
+                       diffpair_audit, track_conformance, route_coverage, dru_guard
 configs/               per-project kicad-bench.toml files
 skills/                SKILL.md wrappers
 tests/                 pytest (pure logic, no kicad-cli needed)

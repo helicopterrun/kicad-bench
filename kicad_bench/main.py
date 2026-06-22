@@ -9,16 +9,19 @@ from __future__ import annotations
 import argparse
 import sys
 
-from . import __version__
+from . import __version__, audit, sidecar
 from .core import cli
 from .quality import block_review, commit_gate, erc_triage, netlist_audit
-from .layout import (dfm_preflight, dru_lint, netclass_coverage, netclass_sync,
-                     release_prep, stackup_sync)
+from .layout import (dfm_preflight, diffpair_audit, dru_guard, dru_lint,
+                     netclass_coverage, netclass_sync, release_prep,
+                     route_coverage, stackup_sync, track_conformance)
 
 _TOOLS = [
+    audit, sidecar,                                              # consolidated audit + live web sidecar
     erc_triage, netlist_audit, block_review, commit_gate,        # Priority 1
     netclass_coverage, netclass_sync, dfm_preflight, stackup_sync,  # Priority 2
     release_prep, dru_lint,
+    diffpair_audit, track_conformance, route_coverage, dru_guard,   # Priority 3: routed-geometry audits
 ]
 
 
