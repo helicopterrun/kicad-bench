@@ -72,9 +72,20 @@ PAGE = """<!doctype html>
   nav#tabs{position:sticky;top:0;z-index:4;display:flex;gap:2px;background:#101113;
            border-bottom:1px solid var(--line);padding:0 10px}
   nav#tabs button{background:transparent;border:0;border-bottom:2px solid transparent;border-radius:0;
-           color:var(--muted);padding:9px 14px;font-weight:600}
+           color:var(--muted);padding:9px 14px;font-weight:600;white-space:nowrap;touch-action:manipulation}
   nav#tabs button:hover{background:#1b1c1f;color:var(--fg)}
   nav#tabs button.active{color:var(--fg);border-bottom-color:var(--info)}
+  .tdd{position:relative;display:inline-flex;margin-left:auto}
+  #moretab{font-size:16px}
+  #tmenu{position:absolute;top:calc(100% + 4px);right:0;z-index:60;display:none;
+         background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:6px;
+         min-width:190px;max-height:72vh;overflow:auto;box-shadow:0 10px 30px #000a}
+  #tmenu.open{display:block}
+  #tmenu .trow{display:block;width:100%;text-align:left;padding:12px;border:0;border-radius:7px;
+         background:transparent;color:var(--fg);font:inherit;font-size:15px;cursor:pointer;
+         font-weight:600;touch-action:manipulation}
+  #tmenu .trow:active{background:#2d2f34}
+  #tmenu .trow.sel{background:#1e2a38;color:#fff}
   iframe#docframe{display:none;width:100%;border:0;background:#fff}
 </style></head>
 <body>
@@ -97,7 +108,7 @@ PAGE = """<!doctype html>
 </main>
 <iframe id="docframe" title="guide"></iframe>
 <script>
-let lastMtime=null, busy=false, curTab="audit", lastSchMtime=null;
+let lastMtime=null, busy=false, curTab="audit", lastSchMtime=null, moreOpen=false, tmenuRows=[];
 const $=id=>document.getElementById(id);
 const esc=s=>(s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 
@@ -179,16 +190,31 @@ function switchTab(kind,i,btn){
   else src="/doc/"+i;
   if(docSrc!==src){ f.src=src; docSrc=src; } f.style.display="block"; sizeFrame();
 }
+function toggleMore(){ moreOpen?closeMore():openMore(); }
+function openMore(){ const m=$("tmenu"); if(m){ m.classList.add("open"); moreOpen=true; } }
+function closeMore(){ const m=$("tmenu"); if(m){ m.classList.remove("open"); moreOpen=false; } }
+document.addEventListener("click",e=>{ if(moreOpen && !e.target.closest(".tdd")) closeMore(); });
 async function loadTabs(){
   let tabs=[]; try{ tabs=await (await fetch("/api/tabs")).json(); }catch(e){}
-  const nav=$("tabs"); nav.innerHTML="";
+  const nav=$("tabs"); nav.innerHTML=""; tmenuRows=[];
   const mk=(label,kind,i)=>{ const b=document.createElement("button"); b.textContent=label;
     b.onclick=()=>switchTab(kind,i,b); nav.appendChild(b); return b; };
   mk("Audit","audit",null).classList.add("active");
   mk("Schematic","preview",null);
   mk("PCB 2D","pcb2d",null);
   mk("PCB 3D","pcb3d",null);
-  tabs.forEach((t,i)=>mk(t.title,"doc",i));
+  if(tabs.length){               // doc guides go behind a hamburger so the bar never overflows
+    const dd=document.createElement("span"); dd.className="tdd";
+    const ham=document.createElement("button"); ham.id="moretab"; ham.textContent="☰"; ham.title="More tabs";
+    ham.onclick=e=>{ e.stopPropagation(); toggleMore(); };
+    const menu=document.createElement("div"); menu.id="tmenu";
+    tabs.forEach((t,i)=>{ const r=document.createElement("button"); r.type="button"; r.className="trow";
+      r.textContent=t.title;
+      r.onclick=()=>{ switchTab("doc",i,null); ham.classList.add("active");
+        tmenuRows.forEach(x=>x.classList.remove("sel")); r.classList.add("sel"); closeMore(); };
+      tmenuRows.push(r); menu.appendChild(r); });
+    dd.appendChild(ham); dd.appendChild(menu); nav.appendChild(dd);
+  }
 }
 window.addEventListener("resize",sizeFrame);
 
