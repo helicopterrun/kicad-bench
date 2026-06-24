@@ -159,12 +159,6 @@ async function poll(){
   try{ const r=await fetch("/api/mtime"); const m=(await r.json()).mtime;
     if(lastMtime!==null && m!==lastMtime){ loadAudit(false); }
   }catch(e){}
-  if(curTab==="preview"){
-    try{ const sm=(await (await fetch("/api/preview/sch.mtime")).json()).mtime;
-      if(lastSchMtime!==null && sm!==lastSchMtime){ docSrc=null; $("docframe").src="/preview/sch.pdf?t="+Date.now(); }
-      lastSchMtime=sm;
-    }catch(e){}
-  }
 }
 // ---- tabs: Audit dashboard + project doc guides (served from /doc/<i>) ----
 let docSrc=null;
@@ -179,7 +173,7 @@ function switchTab(kind,i,btn){
   $("auditctl").style.display=isAudit?"":"none";
   if(isAudit){ f.style.display="none"; return; }
   let src;
-  if(kind==="preview") src="/preview/sch.pdf?t="+Date.now();
+  if(kind==="preview") src="/preview/schematic?t="+Date.now();
   else if(kind==="pcb2d") src="/preview/pcb2d?t="+Date.now();
   else if(kind==="pcb3d") src="/preview/pcb3d?t="+Date.now();
   else src="/doc/"+i;
@@ -366,6 +360,43 @@ tick(); setInterval(tick,2000);
 </body></html>"""
 
 
+# "Schematic" tab. iOS Safari won't render a PDF inside an <iframe> (no zoom/pan/pages),
+# so this wrapper gives an "Open in PDF viewer" link that loads the PDF as a top-level
+# tab — the native viewer, with full pinch-zoom/pan/pages on iPad and desktop alike — and
+# keeps an inline embed for desktop. It re-points both at the fresh PDF when a sheet saves.
+SCHEMATIC_PAGE = """<!doctype html><html><head><meta charset="utf-8"><style>
+ html,body{margin:0;height:100%;background:#1b1c1f;color:#d4d7dd;
+   font:13px/1.5 ui-monospace,Menlo,Consolas,monospace;display:flex;flex-direction:column}
+ #bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:8px 12px;
+   background:#16171a;border-bottom:1px solid #34363b}
+ #bar .lbl{color:#8a8f98}
+ a.btn{background:#2d2f34;color:#d4d7dd;border:1px solid #34363b;border-radius:6px;
+   padding:8px 14px;cursor:pointer;font:inherit;text-decoration:none}
+ a.btn.primary{background:#1e2a38;border-color:#7fa8d8;color:#fff}
+ .hint{color:#8a8f98;font-size:12px}
+ #embed{flex:1;min-height:0;width:100%;border:0;background:#fff}
+</style></head><body>
+<div id="bar"><span class="lbl">Schematic</span>
+  <a class="btn primary" id="open" href="/preview/sch.pdf" target="_blank" rel="noopener">Open in PDF viewer ↗</a>
+  <a class="btn" id="dl" href="/preview/sch.pdf" download="schematic.pdf">Download</a>
+  <span class="hint">On iPad/iOS, tap “Open in PDF viewer” for zoom, pan &amp; pages.</span>
+</div>
+<iframe id="embed" title="schematic" src="/preview/sch.pdf"></iframe>
+<script>
+let mt=null;
+const embed=document.getElementById('embed'), open=document.getElementById('open'), dl=document.getElementById('dl');
+function apply(){ const u='/preview/sch.pdf?t='+(mt||0); embed.src=u; open.href=u; dl.href=u; }
+async function tick(){
+  if(document.hidden) return;
+  try{ const m=(await (await fetch('/api/preview/sch.mtime')).json()).mtime;
+    if(m!==mt){ mt=m; apply(); }
+  }catch(e){}
+}
+tick(); setInterval(tick,3000);
+</script>
+</body></html>"""
+
+
 class _State:
     def __init__(self, cfg: cfgmod.Config):
         self.cfg = cfg
@@ -532,6 +563,8 @@ def _make_handler(state: _State):
             elif path == "/api/preview/sch.mtime":
                 self._send(200, json.dumps({"mtime": state.sch_mtime()}).encode(),
                            "application/json")
+            elif path == "/preview/schematic":
+                self._send(200, SCHEMATIC_PAGE.encode(), "text/html; charset=utf-8")
             elif path == "/preview/sch.pdf":
                 data = state.sch_pdf()
                 if not data:
