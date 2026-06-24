@@ -17,6 +17,7 @@ from __future__ import annotations
 import http.server
 import json
 import re
+import shutil
 import threading
 from pathlib import Path
 from urllib.parse import parse_qs
@@ -24,6 +25,7 @@ from urllib.parse import parse_qs
 from .core import cli
 from .core import config as cfgmod
 from . import audit
+from . import datasheet as dsmod
 
 PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -187,6 +189,7 @@ function switchTab(kind,i,btn){
   if(kind==="preview") src="/preview/schematic?t="+Date.now();
   else if(kind==="pcb2d") src="/preview/pcb2d?t="+Date.now();
   else if(kind==="pcb3d") src="/preview/pcb3d?t="+Date.now();
+  else if(kind==="datasheets") src="/preview/datasheets?t="+Date.now();
   else src="/doc/"+i;
   if(docSrc!==src){ f.src=src; docSrc=src; } f.style.display="block"; sizeFrame();
 }
@@ -203,6 +206,7 @@ async function loadTabs(){
   mk("Schematic","preview",null);
   mk("PCB 2D","pcb2d",null);
   mk("PCB 3D","pcb3d",null);
+  mk("Datasheets","datasheets",null);
   if(tabs.length){               // doc guides go behind a hamburger so the bar never overflows
     const dd=document.createElement("span"); dd.className="tdd";
     const ham=document.createElement("button"); ham.id="moretab"; ham.textContent="☰"; ham.title="More tabs";
@@ -430,6 +434,89 @@ tick(); setInterval(tick,3000);
 </body></html>"""
 
 
+# "Datasheets" tab — a repo datasheet/app-note browser. Picks a PDF, parses its TOC, and renders
+# pages to cached PNGs server-side (iOS-friendly: images, not an inline PDF). Contents dropdown
+# jumps to a section's page; ◀/▶ page through; 1:1 toggles fit vs natural (scroll to read fine
+# print); "Open ↗" hands the raw PDF to the native viewer. Rendering here is for a human, so it's
+# unrestricted (the LLM-only cost rule is about agent image reads, not this).
+DATASHEETS_PAGE = """<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><style>""" + _PCB_CSS + """
+ body{display:flex;flex-direction:column}
+ #bar{flex-wrap:wrap}
+ select{background:#2d2f34;color:#d4d7dd;border:1px solid #34363b;border-radius:6px;
+   padding:7px 10px;font:inherit;max-width:46vw}
+ a.btn{background:#2d2f34;color:#d4d7dd;border:1px solid #34363b;border-radius:6px;
+   padding:7px 12px;text-decoration:none;font:inherit;cursor:pointer}
+ #bar button{touch-action:manipulation}
+ .ind{color:#8a8f98}
+ #stagewrap{flex:1;min-height:0;overflow:auto;display:flex;align-items:center;
+   justify-content:center;padding:10px;box-sizing:border-box;background:#11141a}
+ #stagewrap.scroll{display:block}
+ #im{display:block;border-radius:4px}
+ #im.fit{max-width:100%;max-height:100%;object-fit:contain}
+ #im.full{max-width:none;max-height:none}
+ #msg{color:#8a8f98}
+ .dd{position:relative;display:inline-block}
+ #toc{position:absolute;top:calc(100% + 6px);left:0;z-index:50;display:none;background:#232427;
+   border:1px solid #34363b;border-radius:10px;padding:6px;min-width:300px;max-width:88vw;
+   max-height:72vh;overflow:auto;box-shadow:0 10px 30px #000a}
+ #toc.open{display:block}
+ #toc button{display:block;width:100%;text-align:left;padding:9px 10px;border:0;border-radius:6px;
+   background:transparent;color:#d4d7dd;font:inherit;font-size:14px;cursor:pointer;
+   touch-action:manipulation;white-space:nowrap}
+ #toc button:active{background:#2d2f34}
+ #toc .pg{color:#7fa8d8;margin-right:8px}
+</style></head><body>
+<div id="bar"><span class="lbl">Datasheet</span>
+  <select id="ds"></select>
+  <span class="dd"><button id="tocbtn" onclick="toggleToc(event)">Contents ▾</button><div id="toc"></div></span>
+  <button onclick="go(-1)">◀</button><span class="ind" id="ind">—</span><button onclick="go(1)">▶</button>
+  <button id="zoom" onclick="toggleZoom()">1:1</button>
+  <a class="btn" id="open" target="_blank" rel="noopener">Open ↗</a>
+</div>
+<div id="stagewrap"><img id="im" class="fit" alt="datasheet page"><span id="msg"></span></div>
+<script>
+let idx=-1, page=1, meta=null, tocOpen=false, full=false;
+const im=document.getElementById('im'), msg=document.getElementById('msg'),
+      sel=document.getElementById('ds'), tocEl=document.getElementById('toc'),
+      wrap=document.getElementById('stagewrap');
+function setMsg(t){ msg.textContent=t||''; msg.style.display=t?'block':'none'; im.style.display=t?'none':'block'; }
+function paint(){ if(idx<0||!meta) return;
+  im.src='/preview/datasheet.png?ds='+idx+'&page='+page+'&t='+Date.now();
+  document.getElementById('ind').textContent='p '+page+' / '+meta.n;
+  document.getElementById('open').href='/preview/datasheet.pdf?ds='+idx;
+}
+function go(d){ if(!meta) return; const np=Math.max(1,Math.min(page+d,meta.n)); if(np!==page){ page=np; paint(); } }
+function toggleZoom(){ full=!full; im.className=full?'full':'fit'; wrap.classList.toggle('scroll',full);
+  document.getElementById('zoom').textContent=full?'Fit':'1:1'; }
+function buildToc(){ tocEl.innerHTML=''; const b=document.getElementById('tocbtn');
+  if(!meta||!meta.toc||!meta.toc.length){ b.style.display='none'; return; }
+  b.style.display='';
+  meta.toc.forEach(function(e){ const it=document.createElement('button');
+    it.innerHTML='<span class="pg">p'+e[2]+'</span>'+e[0]+'  '+e[1].replace(/&/g,'&amp;').replace(/</g,'&lt;');
+    it.onclick=function(){ page=e[2]; paint(); closeToc(); }; tocEl.appendChild(it); });
+}
+function toggleToc(e){ if(e) e.stopPropagation();
+  if(tocOpen){ closeToc(); } else { tocEl.classList.add('open'); tocOpen=true; } }
+function closeToc(){ tocEl.classList.remove('open'); tocOpen=false; }
+document.addEventListener('click',function(e){ if(tocOpen && !e.target.closest('.dd')) closeToc(); });
+async function load(i){ idx=i; page=1; meta=null; setMsg('loading…');
+  try{ meta=await (await fetch('/api/datasheet?ds='+i)).json(); }
+  catch(e){ setMsg('could not read datasheet'); return; }
+  setMsg(''); buildToc(); paint();
+}
+async function init(){
+  let d; try{ d=await (await fetch('/api/datasheets')).json(); }catch(e){ setMsg('error loading datasheets'); return; }
+  d.items.forEach(function(it){ const o=document.createElement('option'); o.value=it.i; o.textContent=it.name; sel.appendChild(o); });
+  sel.onchange=function(){ load(+sel.value); };
+  if(!d.poppler){ setMsg('datasheet rendering needs poppler-utils (brew install poppler)'); return; }
+  if(d.items.length){ load(0); } else { setMsg('no datasheets in the repo'); }
+}
+init();
+</script>
+</body></html>"""
+
+
 class _State:
     def __init__(self, cfg: cfgmod.Config):
         self.cfg = cfg
@@ -445,6 +532,8 @@ class _State:
         # 3D PCB preview (slow ~30s — background thread, never blocks a request) — per side
         self._png = {s: {"cache": None, "mtime": None, "rendering": False, "error": None}
                      for s in ("top", "bottom")}
+        # Datasheet viewer: per-PDF meta (parsed TOC + page count), parsed once
+        self._ds_meta: dict = {}                   # str(pdf) -> {"name","n","toc","figs"}
 
     def _mtime(self):
         p = self.cfg.pcb
@@ -564,6 +653,57 @@ class _State:
             return self._png[side]["cache"]
 
 
+    # ---- datasheet viewer (reuses kb datasheet: list / TOC / page render, all cached) ----
+    def datasheet_list(self) -> list[Path]:
+        return dsmod._datasheet_pdfs(self.cfg.root)
+
+    def datasheet_meta(self, idx: int):
+        if not shutil.which("pdftotext"):
+            return None
+        pdfs = self.datasheet_list()
+        if not (0 <= idx < len(pdfs)):
+            return None
+        pdf = pdfs[idx]
+        key = str(pdf)
+        with self.lock:
+            m = self._ds_meta.get(key)
+        if m is None:
+            pages = dsmod._page_texts(pdf)
+            n = len(pages)
+            if n and not pages[-1].strip():
+                n -= 1
+            m = {"name": str(dsmod._rel(pdf, self.cfg.root)),
+                 "n": max(n, 1),
+                 "toc": dsmod._parse_toc(pages),
+                 "figs": dsmod._pinout_figures(pages)}
+            with self.lock:
+                self._ds_meta[key] = m
+        return (pdf, m)
+
+    def datasheet_png(self, idx: int, page: int, dpi: int = 150):
+        if not shutil.which("pdftoppm"):
+            return None
+        got = self.datasheet_meta(idx)
+        if not got:
+            return None
+        pdf, m = got
+        page = max(1, min(int(page), m["n"]))
+        try:
+            out = dsmod._render(pdf, page, dpi, self.cfg.root / dsmod.CACHE_DIRNAME)
+            return out.read_bytes()
+        except Exception:  # noqa: BLE001
+            return None
+
+    def datasheet_pdf_bytes(self, idx: int):
+        pdfs = self.datasheet_list()
+        if not (0 <= idx < len(pdfs)):
+            return None
+        try:
+            return pdfs[idx].read_bytes()
+        except OSError:
+            return None
+
+
 def _make_handler(state: _State):
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, *a):  # keep the console quiet
@@ -580,6 +720,13 @@ def _make_handler(state: _State):
             q = self.path.split("?", 1)[1] if "?" in self.path else ""
             s = (parse_qs(q).get("side", ["top"])[0]).lower()
             return s if s in ("top", "bottom") else "top"
+
+        def _qint(self, name, default=-1):
+            q = self.path.split("?", 1)[1] if "?" in self.path else ""
+            try:
+                return int(parse_qs(q).get(name, [str(default)])[0])
+            except ValueError:
+                return default
 
         def do_GET(self):
             path = self.path.split("?")[0]
@@ -636,6 +783,33 @@ def _make_handler(state: _State):
                     self._send(404, b"3D render not ready", "text/plain")
                 else:
                     self._send(200, data, "image/png")
+            elif path == "/preview/datasheets":
+                self._send(200, DATASHEETS_PAGE.encode(), "text/html; charset=utf-8")
+            elif path == "/api/datasheets":
+                pdfs = state.datasheet_list()
+                body = {"poppler": bool(shutil.which("pdftoppm")),
+                        "items": [{"i": i, "name": str(dsmod._rel(p, state.cfg.root))}
+                                  for i, p in enumerate(pdfs)]}
+                self._send(200, json.dumps(body).encode(), "application/json")
+            elif path == "/api/datasheet":
+                got = state.datasheet_meta(self._qint("ds"))
+                if not got:
+                    self._send(404, b"no such datasheet", "text/plain")
+                else:
+                    self._send(200, json.dumps(got[1]).encode(), "application/json")
+            elif path == "/preview/datasheet.png":
+                data = state.datasheet_png(self._qint("ds"), self._qint("page", 1),
+                                           self._qint("dpi", 150))
+                if not data:
+                    self._send(404, b"datasheet page not available", "text/plain")
+                else:
+                    self._send(200, data, "image/png")
+            elif path == "/preview/datasheet.pdf":
+                data = state.datasheet_pdf_bytes(self._qint("ds"))
+                if not data:
+                    self._send(404, b"no such datasheet", "text/plain")
+                else:
+                    self._send(200, data, "application/pdf")
             elif path.startswith("/doc/"):
                 try:
                     tab = state.cfg.sidecar_tabs[int(path[len("/doc/"):])]
