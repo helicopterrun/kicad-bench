@@ -448,6 +448,9 @@ DATASHEETS_PAGE = """<!doctype html><html><head><meta charset="utf-8">
  a.btn{background:#2d2f34;color:#d4d7dd;border:1px solid #34363b;border-radius:6px;
    padding:7px 12px;text-decoration:none;font:inherit;cursor:pointer}
  #bar button{touch-action:manipulation}
+ #q{background:#2d2f34;color:#d4d7dd;border:1px solid #34363b;border-radius:6px;
+   padding:6px 10px;font:inherit;width:130px}
+ #sres{display:inline-flex;flex-wrap:wrap;gap:4px;align-items:center}
  .ind{color:#8a8f98}
  #chips{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:6px 12px;
    background:#16171a;border-bottom:1px solid #34363b}
@@ -478,8 +481,11 @@ DATASHEETS_PAGE = """<!doctype html><html><head><meta charset="utf-8">
 <div id="bar"><span class="lbl">Datasheet</span>
   <select id="ds"></select>
   <span class="dd"><button id="tocbtn" onclick="toggleToc(event)">Contents ▾</button><div id="toc"></div></span>
+  <button onclick="toTop()" title="First page">⤒ Top</button>
   <button onclick="go(-1)">◀</button><span class="ind" id="ind">—</span><button onclick="go(1)">▶</button>
   <button id="zoom" onclick="toggleZoom()">1:1</button>
+  <input id="q" type="search" placeholder="find in doc…" onkeydown="if(event.key==='Enter')doSearch()">
+  <span id="sres"></span>
   <a class="btn" id="open" target="_blank" rel="noopener">Open ↗</a>
 </div>
 <div id="chips"></div>
@@ -494,8 +500,25 @@ function paint(){ if(idx<0||!meta) return;
   im.src='/preview/datasheet.png?ds='+idx+'&page='+page+'&t='+Date.now();
   document.getElementById('ind').textContent='p '+page+' / '+meta.n;
   document.getElementById('open').href='/preview/datasheet.pdf?ds='+idx;
+  saveLast();
 }
 function go(d){ if(!meta) return; const np=Math.max(1,Math.min(page+d,meta.n)); if(np!==page){ page=np; paint(); } }
+function lkey(){ return meta?('dsv:'+meta.name):null; }
+function saveLast(){ try{ if(meta){ localStorage.setItem(lkey(),page); localStorage.setItem('dsv:lastdoc',meta.name); } }catch(e){} }
+function lastPage(){ try{ const v=localStorage.getItem(lkey()); const n=v?parseInt(v,10):0; return (n>=1&&n<=meta.n)?n:1; }catch(e){ return 1; } }
+function toTop(){ jump(1); wrap.scrollTop=0; wrap.scrollLeft=0; }
+async function doSearch(){ const q=document.getElementById('q').value.trim(), s=document.getElementById('sres');
+  if(idx<0) return; if(q.length<2){ s.innerHTML=''; return; }
+  s.innerHTML='<span class="ind">searching…</span>';
+  let pages=[]; try{ pages=((await (await fetch('/api/datasheet/search?ds='+idx+'&q='+encodeURIComponent(q))).json()).pages)||[]; }catch(e){}
+  if(!pages.length){ s.innerHTML='<span class="ind">no matches</span>'; return; }
+  s.innerHTML=''; const lab=document.createElement('span'); lab.className='ind';
+  lab.textContent=pages.length+' hit'+(pages.length>1?'s':'')+': '; s.appendChild(lab);
+  pages.slice(0,15).forEach(function(pg){ const b=document.createElement('button'); b.className='chip';
+    b.textContent='p'+pg; b.onclick=function(){ jump(pg); }; s.appendChild(b); });
+  if(pages.length>15){ const e=document.createElement('span'); e.className='ind'; e.textContent='…'; s.appendChild(e); }
+  jump(pages[0]);
+}
 function toggleZoom(){ full=!full; im.className=full?'full':'fit'; wrap.classList.toggle('scroll',full);
   document.getElementById('zoom').textContent=full?'Fit':'1:1'; }
 function buildToc(){ tocEl.innerHTML=''; const b=document.getElementById('tocbtn');
@@ -533,18 +556,23 @@ function toggleToc(e){ if(e) e.stopPropagation();
   if(tocOpen){ closeToc(); } else { tocEl.classList.add('open'); tocOpen=true; } }
 function closeToc(){ tocEl.classList.remove('open'); tocOpen=false; }
 document.addEventListener('click',function(e){ if(tocOpen && !e.target.closest('.dd')) closeToc(); });
-async function load(i){ idx=i; page=1; meta=null; document.getElementById('chips').innerHTML='';
+async function load(i){ idx=i; meta=null; document.getElementById('chips').innerHTML='';
+  document.getElementById('sres').innerHTML=''; document.getElementById('q').value='';
   setMsg('loading…');
   try{ meta=await (await fetch('/api/datasheet?ds='+i)).json(); }
   catch(e){ setMsg('could not read datasheet'); return; }
-  setMsg(''); buildToc(); buildChips(); paint();
+  page=lastPage(); setMsg(''); buildToc(); buildChips(); paint();
 }
 async function init(){
   let d; try{ d=await (await fetch('/api/datasheets')).json(); }catch(e){ setMsg('error loading datasheets'); return; }
   d.items.forEach(function(it){ const o=document.createElement('option'); o.value=it.i; o.textContent=it.name; sel.appendChild(o); });
   sel.onchange=function(){ load(+sel.value); };
   if(!d.poppler){ setMsg('datasheet rendering needs poppler-utils (brew install poppler)'); return; }
-  if(d.items.length){ load(0); } else { setMsg('no datasheets in the repo'); }
+  if(!d.items.length){ setMsg('no datasheets in the repo'); return; }
+  let start=d.items[0].i;
+  try{ const last=localStorage.getItem('dsv:lastdoc');
+    if(last){ const it=d.items.find(function(x){ return x.name===last; }); if(it) start=it.i; } }catch(e){}
+  sel.value=start; load(start);
 }
 init();
 </script>
@@ -568,6 +596,7 @@ class _State:
                      for s in ("top", "bottom")}
         # Datasheet viewer: per-PDF meta (parsed TOC + page count), parsed once
         self._ds_meta: dict = {}                   # str(pdf) -> {"name","n","toc","figs"}
+        self._ds_text: dict = {}                   # str(pdf) -> page texts (for in-doc search)
 
     def _mtime(self):
         p = self.cfg.pcb
@@ -717,7 +746,21 @@ class _State:
                  "sections": sections}
             with self.lock:
                 self._ds_meta[key] = m
+                self._ds_text[key] = pages
         return (pdf, m)
+
+    def datasheet_search(self, idx: int, q: str) -> list[int]:
+        q = (q or "").strip()
+        if len(q) < 2:
+            return []
+        got = self.datasheet_meta(idx)
+        if not got:
+            return []
+        pdf, _ = got
+        with self.lock:
+            pages = self._ds_text.get(str(pdf)) or []
+        ql = q.lower()
+        return [i + 1 for i, t in enumerate(pages) if ql in t.lower()]
 
     def datasheet_png(self, idx: int, page: int, dpi: int = 150):
         if not shutil.which("pdftoppm"):
@@ -766,6 +809,10 @@ def _make_handler(state: _State):
                 return int(parse_qs(q).get(name, [str(default)])[0])
             except ValueError:
                 return default
+
+        def _qstr(self, name, default=""):
+            q = self.path.split("?", 1)[1] if "?" in self.path else ""
+            return parse_qs(q).get(name, [default])[0]
 
         def do_GET(self):
             path = self.path.split("?")[0]
@@ -836,6 +883,9 @@ def _make_handler(state: _State):
                     self._send(404, b"no such datasheet", "text/plain")
                 else:
                     self._send(200, json.dumps(got[1]).encode(), "application/json")
+            elif path == "/api/datasheet/search":
+                res = state.datasheet_search(self._qint("ds"), self._qstr("q"))
+                self._send(200, json.dumps({"pages": res}).encode(), "application/json")
             elif path == "/preview/datasheet.png":
                 data = state.datasheet_png(self._qint("ds"), self._qint("page", 1),
                                            self._qint("dpi", 150))
