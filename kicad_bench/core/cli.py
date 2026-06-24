@@ -11,6 +11,7 @@ toolchain-setup notes.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -181,6 +182,40 @@ def export_pcb_svg(pcb: str | Path, side: str = "top") -> bytes:
     if not data:
         raise KicadCliError(f"PCB SVG export produced no output:\n{r.stderr.strip()}")
     return data
+
+
+def export_pcb_layer_svg(pcb: str | Path, layer: str, color: str | None = None) -> bytes:
+    """Export ONE board layer as a cropped, drawing-sheet-free SVG and return its bytes,
+    optionally recolored to a single hex color. Every layer is plotted to the same
+    board-area viewBox, so the sidecar can stack layers as pixel-aligned overlays that
+    toggle and color independently. Each layer's plot is monochrome apart from hole
+    knockouts (black/white), which are left untouched so pads still read as donuts."""
+    _require()
+    with tempfile.NamedTemporaryFile(suffix=".svg", delete=False) as f:
+        out = f.name
+    r = subprocess.run(
+        ["kicad-cli", "pcb", "export", "svg",
+         "--mode-single", "--layers", layer,
+         "--page-size-mode", "2", "--exclude-drawing-sheet",
+         "--output", out, str(pcb)],
+        capture_output=True, text=True,
+    )
+    try:
+        text = Path(out).read_text()
+    except OSError:
+        raise KicadCliError(f"PCB layer SVG export failed ({layer}):\n{r.stderr.strip()}")
+    finally:
+        Path(out).unlink(missing_ok=True)
+    if not text:
+        raise KicadCliError(f"PCB layer SVG export produced no output ({layer}):\n{r.stderr.strip()}")
+    if color:
+        hexc = "#" + color.lstrip("#")
+        text = re.sub(
+            r"#[0-9A-Fa-f]{6}",
+            lambda m: m.group(0) if m.group(0).upper() in ("#000000", "#FFFFFF") else hexc,
+            text,
+        )
+    return text.encode()
 
 
 def render_pcb_3d(pcb: str | Path, side: str = "top",

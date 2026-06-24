@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import http.server
 import json
+import re
 import threading
 from pathlib import Path
 from urllib.parse import parse_qs
@@ -219,35 +220,82 @@ _PCB_CSS = """
  img{max-width:100%;max-height:100%;object-fit:contain}
  .dim{opacity:.55}"""
 
-# "PCB 2D" tab — a dark-background wrapper around the kicad-cli SVG export with a
-# Top/Bottom toggle. It polls the board mtime and swaps the <img> on save, so the toggle
-# state survives a re-render (reloading the iframe would reset it). The bottom side is
-# mirrored server-side; layer colors are theme colors meant for this dark canvas.
+# "PCB 2D" tab — a dark-background layer browser. Each board layer is fetched as its own
+# SVG (recolored server-side to a palette color) and stacked as a pixel-aligned overlay;
+# checkboxes toggle layers and a colored swatch shows each layer's color. Top/Bottom are
+# presets (a sensible layer set + mirror); individual layers refine it. The page polls
+# board mtime and refreshes only the visible overlays on save, preserving the toggles.
 PCB2D_PAGE = """<!doctype html><html><head><meta charset="utf-8"><style>""" + _PCB_CSS + """
- #wrap{height:calc(100% - 39px);display:flex;align-items:center;justify-content:center;
+ body{display:flex;flex-direction:column}
+ #bar{flex-wrap:wrap}
+ #stagewrap{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;
    padding:10px;box-sizing:border-box}
+ #stage{position:relative;width:100%;height:100%}
+ #stage.mir{transform:scaleX(-1)}
+ #stage img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
+ #layers{display:flex;flex-wrap:wrap;align-items:center}
+ .lyr{display:inline-flex;align-items:center;gap:4px;margin:0 6px 0 0;cursor:pointer;
+   color:#d4d7dd;font-size:12px}
+ .lyr input{margin:0}
+ .sw{width:10px;height:10px;border-radius:2px;display:inline-block;border:1px solid #0006}
 </style></head><body>
 <div id="bar"><span class="lbl">PCB 2D</span>
-  <button id="bt" class="active" onclick="setSide('top')">Top</button>
-  <button id="bb" onclick="setSide('bottom')">Bottom</button>
+  <button id="bt" class="active" onclick="preset('top')">Top</button>
+  <button id="bb" onclick="preset('bottom')">Bottom</button>
+  <span id="layers"></span>
 </div>
-<div id="wrap"><img id="im" alt="PCB 2D"></div>
+<div id="stagewrap"><div id="stage"></div></div>
 <script>
-let side='top', mt=null;
-const im=document.getElementById('im');
-function paint(){ im.src='/preview/pcb.svg?side='+side+'&t='+(mt||0); }
-function setSide(s){ side=s;
-  document.getElementById('bt').classList.toggle('active',s==='top');
-  document.getElementById('bb').classList.toggle('active',s==='bottom');
-  paint();
+const LAYERS=[
+ {id:'B.Cu',         name:'B.Cu',   color:'4D7FC4'},
+ {id:'In2.Cu',       name:'In2.Cu', color:'C200C2'},
+ {id:'In1.Cu',       name:'In1.Cu', color:'C2C200'},
+ {id:'F.Cu',         name:'F.Cu',   color:'C83434'},
+ {id:'B.Mask',       name:'B.Mask', color:'7C4F8E'},
+ {id:'F.Mask',       name:'F.Mask', color:'E552E5'},
+ {id:'B.Silkscreen', name:'B.Silk', color:'AAAAAA'},
+ {id:'F.Silkscreen', name:'F.Silk', color:'EEEEEE'},
+ {id:'B.Fab',        name:'B.Fab',  color:'80857F'},
+ {id:'F.Fab',        name:'F.Fab',  color:'C2A36B'},
+ {id:'Edge.Cuts',    name:'Edge',   color:'F0E68C'},
+];
+const DEFAULT_ON=['F.Cu','F.Silkscreen','Edge.Cuts'];
+const stage=document.getElementById('stage'), imgs={}, cbs={};
+let mt=0, mirror=false;
+function src(L){ return '/preview/pcb-layer.svg?layer='+encodeURIComponent(L.id)+'&color='+L.color+'&t='+mt; }
+function show(L,on){
+  if(on){ let im=imgs[L.id];
+    if(!im){ im=new Image(); im.alt=L.id; im.style.zIndex=LAYERS.indexOf(L); imgs[L.id]=im; stage.appendChild(im); }
+    im.src=src(L); im.style.display='block';
+  }else if(imgs[L.id]){ imgs[L.id].style.display='none'; }
+}
+function build(){
+  const box=document.getElementById('layers');
+  LAYERS.forEach(L=>{
+    const lab=document.createElement('label'); lab.className='lyr';
+    const cb=document.createElement('input'); cb.type='checkbox'; cb.checked=DEFAULT_ON.includes(L.id);
+    const sw=document.createElement('span'); sw.className='sw'; sw.style.background='#'+L.color;
+    cb.onchange=()=>show(L,cb.checked); cbs[L.id]=cb;
+    lab.appendChild(cb); lab.appendChild(sw); lab.appendChild(document.createTextNode(L.name));
+    box.appendChild(lab);
+  });
+}
+function preset(p){
+  const want = p==='bottom' ? ['B.Cu','B.Silkscreen','Edge.Cuts'] : ['F.Cu','F.Silkscreen','Edge.Cuts'];
+  LAYERS.forEach(L=>{ const on=want.includes(L.id); cbs[L.id].checked=on; show(L,on); });
+  mirror=(p==='bottom'); stage.classList.toggle('mir',mirror);
+  document.getElementById('bt').classList.toggle('active',p==='top');
+  document.getElementById('bb').classList.toggle('active',p==='bottom');
 }
 async function tick(){
   if(document.hidden) return;
   try{ const m=(await (await fetch('/api/mtime')).json()).mtime;
-    if(m!==mt){ mt=m; paint(); }
+    if(m!==mt){ mt=m; LAYERS.forEach(L=>{ const im=imgs[L.id]; if(im&&im.style.display!=='none') im.src=src(L); }); }
   }catch(e){}
 }
-paint(); tick(); setInterval(tick,3000);
+build();
+LAYERS.forEach(L=>{ if(DEFAULT_ON.includes(L.id)) show(L,true); });
+tick(); setInterval(tick,3000);
 </script>
 </body></html>"""
 
@@ -307,6 +355,8 @@ class _State:
         self.sch_cache_mtime = None
         # 2D PCB preview (fast, synchronous, board-mtime cached) — keyed by side
         self._svg: dict = {}                       # side -> (mtime, bytes)
+        # 2D per-layer SVG overlays (recolored), board-mtime cached — keyed by (layer, color)
+        self._layer_svg: dict = {}                 # (layer, color) -> (mtime, bytes)
         # 3D PCB preview (slow ~30s — background thread, never blocks a request) — per side
         self._png = {s: {"cache": None, "mtime": None, "rendering": False, "error": None}
                      for s in ("top", "bottom")}
@@ -368,6 +418,26 @@ class _State:
             return None
         with self.lock:
             self._svg[side] = (m, data)
+        return data
+
+    def pcb_layer_svg(self, layer, color=None):
+        """Cached recolored SVG (bytes) for one board layer, refreshed on board change.
+        Returns None on no-board / render failure — a missing overlay must not break the
+        tab."""
+        if not self.cfg.pcb:
+            return None
+        m = self._mtime()
+        key = (layer, color)
+        with self.lock:
+            c = self._layer_svg.get(key)
+            if c is not None and c[0] == m:
+                return c[1]
+        try:  # render OUTSIDE the lock — don't stall audit/mtime requests
+            data = cli.export_pcb_layer_svg(self.cfg.pcb, layer, color)
+        except Exception:  # noqa: BLE001
+            return None
+        with self.lock:
+            self._layer_svg[key] = (m, data)
         return data
 
     def pcb_3d_state(self, side="top") -> dict:
@@ -454,6 +524,18 @@ def _make_handler(state: _State):
                 data = state.pcb_svg(self._side())
                 if not data:
                     self._send(404, b"no PCB preview (no board or render failed)", "text/plain")
+                else:
+                    self._send(200, data, "image/svg+xml; charset=utf-8")
+            elif path == "/preview/pcb-layer.svg":
+                q = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+                layer = q.get("layer", [""])[0]
+                color = q.get("color", [""])[0]
+                if not re.fullmatch(r"[A-Za-z0-9._]+", layer):
+                    self._send(400, b"bad layer", "text/plain"); return
+                color = color if re.fullmatch(r"[0-9A-Fa-f]{6}", color) else None
+                data = state.pcb_layer_svg(layer, color)
+                if not data:
+                    self._send(404, b"layer render failed", "text/plain")
                 else:
                     self._send(200, data, "image/svg+xml; charset=utf-8")
             elif path == "/preview/pcb3d":
