@@ -222,9 +222,9 @@ _PCB_CSS = """
 PCB2D_PAGE = """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><style>""" + _PCB_CSS + """
  body{display:flex;flex-direction:column}
- #bar{flex-wrap:wrap}
+ #bar{flex-wrap:wrap;z-index:50}
  #stagewrap{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;
-   padding:10px;box-sizing:border-box;background:#001023}
+   padding:10px;box-sizing:border-box;background:#001023;position:relative;z-index:0}
  #stage{position:relative;width:100%;height:100%}
  #stage.mir{transform:scaleX(-1)}
  #stage img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
