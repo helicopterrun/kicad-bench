@@ -243,6 +243,8 @@ PCB2D_PAGE = """<!doctype html><html><head><meta charset="utf-8">
  #menu .nm{flex:1}
  #menu .ck{width:18px;text-align:center;color:#7fa8d8;opacity:0}
  #menu .row.on .ck{opacity:1}
+ #menu .allrow{justify-content:center;font-weight:600;color:#7fa8d8;border-radius:0;
+   border-bottom:1px solid #34363b;margin-bottom:4px;padding:10px}
 </style></head><body>
 <div id="bar"><span class="lbl">PCB 2D</span>
   <button id="bt" class="active" onclick="preset('top')">Top</button>
@@ -277,9 +279,15 @@ function show(L,on){
     im.src=src(L); im.style.display='block';
   }else if(imgs[L.id]){ imgs[L.id].style.display='none'; }
   if(rows[L.id]) rows[L.id].classList.toggle('on',on);
+  updateAll();
 }
+function allOn(){ return LAYERS.every(L=>imgs[L.id] && imgs[L.id].style.display!=='none'); }
+function updateAll(){ const b=document.getElementById('allbtn'); if(b) b.textContent=allOn()?'All off':'All on'; }
+function toggleAll(){ const on=!allOn(); LAYERS.forEach(L=>show(L,on)); }
 function buildMenu(){
   const menu=document.getElementById('menu');
+  const all=document.createElement('button'); all.type='button'; all.id='allbtn'; all.className='row allrow';
+  all.onclick=toggleAll; menu.appendChild(all);
   LAYERS.forEach(L=>{
     const row=document.createElement('button'); row.type='button'; row.className='row';
     row.innerHTML='<span class="sw" style="background:#'+L.color+'"></span>'+
@@ -287,6 +295,7 @@ function buildMenu(){
     row.onclick=()=>show(L,!row.classList.contains('on'));
     rows[L.id]=row; menu.appendChild(row);
   });
+  updateAll();
 }
 function preset(p){
   const want = p==='bottom' ? ['B.Cu','B.Silkscreen','Edge.Cuts'] : ['F.Cu','F.Silkscreen','Edge.Cuts'];
