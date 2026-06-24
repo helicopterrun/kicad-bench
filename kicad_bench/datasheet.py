@@ -136,29 +136,48 @@ def _pinout_figures(pages: list[str]) -> list[tuple[int, list[str]]]:
 # Table-of-contents line: "<section#> <title> <dotted leaders> <page>". The leader is >=3
 # dots, each optionally trailed by spaces, so it matches both TI's "....." and ST's ". . .".
 _TOC_HEAD = re.compile(r"^\s*(?:table of )?contents\s*$", re.I)
-_TOC_LINE = re.compile(r"^\s*(\d+(?:\.\d+)*)\s+(.+?)\s*(?:\.[ \t]*){3,}\s*(\d+)\s*$")
+# One TOC entry: "<section#> <title> <dotted leaders> <page>". Unanchored + finditer so a
+# two-column TOC line (TI style, where pdftotext -layout merges both columns) yields BOTH
+# entries instead of swallowing the second column's page into the first entry's title.
+_TOC_ENTRY = re.compile(r"(\d+(?:\.\d+)*)\s+(.+?)(?:\.[ \t]*){3,}\s*(\d+)")
+
+
+def _toc_entries(text: str) -> list[tuple[str, str, int]]:
+    out: list[tuple[str, str, int]] = []
+    for ln in text.splitlines():
+        for m in _TOC_ENTRY.finditer(ln):
+            title = re.sub(r"\s+", " ", m.group(2)).strip()
+            if title:
+                out.append((m.group(1), title, int(m.group(3))))
+    return out
 
 
 def _parse_toc(pages: list[str]) -> list[tuple[str, str, int]]:
-    """Parse the document's own table of contents into (section, title, page) rows. Works
-    for any PDF that has one — datasheets AND application notes / explainer docs, across
-    manufacturers (TI, ST, …). Page numbers are the printed numbers, which equal the PDF page
-    index in the TI/ST docs we read (no front-matter offset)."""
+    """Parse the document's own table of contents into (section, title, page) rows, sorted by
+    section number. Works for any PDF that has one — datasheets AND application notes /
+    explainer docs, across manufacturers (TI, ST, …), including TI's two-column TOC layout.
+    Page numbers are the printed numbers, which equal the PDF page index in the docs we read."""
     start = None
     for i, t in enumerate(pages[:8]):
-        if _TOC_HEAD.search(t) or sum(bool(_TOC_LINE.match(ln)) for ln in t.splitlines()) >= 3:
+        if _TOC_HEAD.search(t) or len(_toc_entries(t)) >= 3:
             start = i
             break
     if start is None:
         return []
-    out: list[tuple[str, str, int]] = []
+    rows: list[tuple[str, str, int]] = []
     for t in pages[start:start + 15]:
-        rows = [m for m in (_TOC_LINE.match(ln) for ln in t.splitlines()) if m]
-        if not rows and out:
+        e = _toc_entries(t)
+        if not e and rows:
             break                      # past the end of the TOC
-        out += [(m.group(1), re.sub(r"\s+", " ", m.group(2)).strip(), int(m.group(3)))
-                for m in rows]
-    return out
+        rows += e
+
+    def _key(r):
+        try:
+            return tuple(int(x) for x in r[0].split("."))
+        except ValueError:
+            return (9999,)
+    rows.sort(key=_key)
+    return rows
 
 
 def _rel(pdf: Path, root: Path):

@@ -449,6 +449,14 @@ DATASHEETS_PAGE = """<!doctype html><html><head><meta charset="utf-8">
    padding:7px 12px;text-decoration:none;font:inherit;cursor:pointer}
  #bar button{touch-action:manipulation}
  .ind{color:#8a8f98}
+ #chips{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:6px 12px;
+   background:#16171a;border-bottom:1px solid #34363b}
+ #chips:empty{display:none}
+ #chips .lbl{color:#8a8f98;font-size:12px;margin-right:2px}
+ .chip{background:#2d2f34;border:1px solid #34363b;border-radius:14px;padding:5px 11px;
+   color:#d4d7dd;font:inherit;font-size:12px;cursor:pointer;touch-action:manipulation}
+ .chip.pin{border-color:#7fa8d8;color:#cfe0e5}
+ .chip:active{background:#383b41}
  #stagewrap{flex:1;min-height:0;overflow:auto;display:flex;align-items:center;
    justify-content:center;padding:10px;box-sizing:border-box;background:#11141a}
  #stagewrap.scroll{display:block}
@@ -474,6 +482,7 @@ DATASHEETS_PAGE = """<!doctype html><html><head><meta charset="utf-8">
   <button id="zoom" onclick="toggleZoom()">1:1</button>
   <a class="btn" id="open" target="_blank" rel="noopener">Open ↗</a>
 </div>
+<div id="chips"></div>
 <div id="stagewrap"><img id="im" class="fit" alt="datasheet page"><span id="msg"></span></div>
 <script>
 let idx=-1, page=1, meta=null, tocOpen=false, full=false;
@@ -496,14 +505,39 @@ function buildToc(){ tocEl.innerHTML=''; const b=document.getElementById('tocbtn
     it.innerHTML='<span class="pg">p'+e[2]+'</span>'+e[0]+'  '+e[1].replace(/&/g,'&amp;').replace(/</g,'&lt;');
     it.onclick=function(){ page=e[2]; paint(); closeToc(); }; tocEl.appendChild(it); });
 }
+function jump(pg){ page=pg; if(full) toggleZoom(); paint(); }
+function mkchip(parent,label,pg,isPin){ const b=document.createElement('button');
+  b.className='chip'+(isPin?' pin':''); b.textContent=label;
+  b.onclick=function(){ jump(pg); }; parent.appendChild(b); }
+const SECKW={pinout:['pinout','pin configuration','pin description','pin assignment'],
+  'abs-max':['absolute maximum'],
+  'typical-app':['typical application','application information','application circuit','application schematic'],
+  layout:['layout','land pattern','recommended footprint']};
+// Prefer the doc's TOC (accurate); fall back to keyword locate only when there's no TOC.
+function secPage(key){ const toc=meta.toc||[], kw=SECKW[key]||[];
+  if(toc.length){ for(let i=0;i<toc.length;i++){ const t=toc[i][1].toLowerCase();
+      for(let j=0;j<kw.length;j++){ if(t.indexOf(kw[j])>=0) return toc[i][2]; } }
+    return null; }
+  const arr=(meta.sections||{})[key]||[]; return arr.length?arr[0]:null;
+}
+function buildChips(){ const c=document.getElementById('chips'); c.innerHTML=''; if(!meta) return;
+  const figs=meta.figs||[], seen={};
+  if(figs.length){ const l=document.createElement('span'); l.className='lbl'; l.textContent='Pinouts:'; c.appendChild(l);
+    figs.forEach(function(e){ e[1].forEach(function(pk){
+      if(!(pk in seen)){ seen[pk]=e[0]; mkchip(c,pk,e[0],true); } }); });
+  } else { const pp=secPage('pinout'); if(pp) mkchip(c,'Pinout',pp,true); }
+  [['abs-max','Abs-max'],['typical-app','Typical app'],['layout','Layout']].forEach(function(s){
+    const pg=secPage(s[0]); if(pg) mkchip(c,s[1],pg,false); });
+}
 function toggleToc(e){ if(e) e.stopPropagation();
   if(tocOpen){ closeToc(); } else { tocEl.classList.add('open'); tocOpen=true; } }
 function closeToc(){ tocEl.classList.remove('open'); tocOpen=false; }
 document.addEventListener('click',function(e){ if(tocOpen && !e.target.closest('.dd')) closeToc(); });
-async function load(i){ idx=i; page=1; meta=null; setMsg('loading…');
+async function load(i){ idx=i; page=1; meta=null; document.getElementById('chips').innerHTML='';
+  setMsg('loading…');
   try{ meta=await (await fetch('/api/datasheet?ds='+i)).json(); }
   catch(e){ setMsg('could not read datasheet'); return; }
-  setMsg(''); buildToc(); paint();
+  setMsg(''); buildToc(); buildChips(); paint();
 }
 async function init(){
   let d; try{ d=await (await fetch('/api/datasheets')).json(); }catch(e){ setMsg('error loading datasheets'); return; }
@@ -672,10 +706,15 @@ class _State:
             n = len(pages)
             if n and not pages[-1].strip():
                 n -= 1
+            loc = dsmod._locate_pages(pages)
+            toc_idx = dsmod._toc_pages(loc)
+            sections = {k: [p for p in loc[k] if p not in toc_idx]
+                        for k in ("pinout", "abs-max", "typical-app", "layout")}
             m = {"name": str(dsmod._rel(pdf, self.cfg.root)),
                  "n": max(n, 1),
                  "toc": dsmod._parse_toc(pages),
-                 "figs": dsmod._pinout_figures(pages)}
+                 "figs": dsmod._pinout_figures(pages),
+                 "sections": sections}
             with self.lock:
                 self._ds_meta[key] = m
         return (pdf, m)
