@@ -9,7 +9,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from . import __version__, audit, sidecar, stage
+from . import __version__, audit, datasheet, sidecar, stage
 from . import init as init_cmd
 from .core import cli
 from .quality import block_review, commit_gate, erc_triage, netlist_audit
@@ -19,7 +19,7 @@ from .layout import (dfm_preflight, diffpair_audit, dru_guard, dru_lint,
 
 _TOOLS = [
     init_cmd,                                                    # one-command bring-up for a new board
-    audit, sidecar, stage,                                       # consolidated audit + live web sidecar + lock-aware queue
+    audit, sidecar, stage, datasheet,                            # consolidated audit + live web sidecar + lock-aware queue + datasheet viewer
     erc_triage, netlist_audit, block_review, commit_gate,        # Priority 1
     netclass_coverage, netclass_sync, dfm_preflight, stackup_sync,  # Priority 2
     release_prep, dru_lint,
