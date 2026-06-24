@@ -7,14 +7,21 @@ tables, typical-application circuits and recommended-layout figures are *images*
 with the Read tool. The cheap Sonnet `quick-questions` agent should stay on text and DEFER
 figures to the main agent.
 
+`toc` parses the document's OWN table of contents, so it navigates any doc that has one —
+datasheets AND application notes / explainer docs alike, across manufacturers (TI's "....."
+and ST's ". . ." leaders both parse). `--toc` then renders a section by its real title/number.
+
 Rendering is cached + idempotent (a given page+dpi is never rendered twice), so figures are
 fetched once and reused. The cache (`.datasheet-cache/` at the repo root) self-ignores via an
-inner `.gitignore`, so it never shows up in git.
+inner `.gitignore`, so it never shows up in git. Any `query` may also be a direct path to a
+PDF (for an ad-hoc app note that isn't in the repo).
 
-  kb datasheet list                    # datasheet PDFs in the repo
-  kb datasheet locate tps65150         # section -> page candidates (text only, cheap)
-  kb datasheet view tps65150 --section pinout,abs-max,typical-app,layout
-  kb datasheet view tps65150 --pages 3,4 [--dpi 150]
+  kb datasheet list                       # datasheet PDFs in the repo
+  kb datasheet toc tps65150               # the document's own table of contents
+  kb datasheet locate tps65150            # datasheet section -> page (pinout/abs-max/…)
+  kb datasheet view tps65150 --section pinout --package LQFP48
+  kb datasheet view tps65150 --toc "device summary"     # navigate by any TOC section
+  kb datasheet view /tmp/szza036c.pdf --toc 3.2         # query can be a direct PDF path
 
 Requires poppler-utils (pdftotext/pdftoppm): apt-get install poppler-utils / brew install poppler.
 """
@@ -126,6 +133,50 @@ def _pinout_figures(pages: list[str]) -> list[tuple[int, list[str]]]:
     return out
 
 
+# Table-of-contents line: "<section#> <title> <dotted leaders> <page>". The leader is >=3
+# dots, each optionally trailed by spaces, so it matches both TI's "....." and ST's ". . .".
+_TOC_HEAD = re.compile(r"^\s*(?:table of )?contents\s*$", re.I)
+_TOC_LINE = re.compile(r"^\s*(\d+(?:\.\d+)*)\s+(.+?)\s*(?:\.[ \t]*){3,}\s*(\d+)\s*$")
+
+
+def _parse_toc(pages: list[str]) -> list[tuple[str, str, int]]:
+    """Parse the document's own table of contents into (section, title, page) rows. Works
+    for any PDF that has one — datasheets AND application notes / explainer docs, across
+    manufacturers (TI, ST, …). Page numbers are the printed numbers, which equal the PDF page
+    index in the TI/ST docs we read (no front-matter offset)."""
+    start = None
+    for i, t in enumerate(pages[:8]):
+        if _TOC_HEAD.search(t) or sum(bool(_TOC_LINE.match(ln)) for ln in t.splitlines()) >= 3:
+            start = i
+            break
+    if start is None:
+        return []
+    out: list[tuple[str, str, int]] = []
+    for t in pages[start:start + 15]:
+        rows = [m for m in (_TOC_LINE.match(ln) for ln in t.splitlines()) if m]
+        if not rows and out:
+            break                      # past the end of the TOC
+        out += [(m.group(1), re.sub(r"\s+", " ", m.group(2)).strip(), int(m.group(3)))
+                for m in rows]
+    return out
+
+
+def _rel(pdf: Path, root: Path):
+    try:
+        return pdf.relative_to(root)
+    except ValueError:
+        return pdf
+
+
+def _resolve_pdfs(query: str, root: Path) -> list[Path]:
+    """A direct path to an existing PDF (for ad-hoc app notes / explainer docs), else a
+    repo-datasheet name/LCSC# match."""
+    p = Path(query).expanduser()
+    if p.suffix.lower() == ".pdf" and p.is_file():
+        return [p]
+    return _match(query, _datasheet_pdfs(root))
+
+
 def _toc_pages(loc: dict[str, list[int]]) -> set[int]:
     """Pages that match >=3 sections are almost certainly a table-of-contents/index page;
     drop them so --section doesn't render the TOC."""
@@ -175,14 +226,35 @@ def _cmd_list(args) -> int:
     return 0
 
 
+def _cmd_toc(args) -> int:
+    root = _root(args)
+    hits = _resolve_pdfs(args.query, root)
+    if not hits:
+        print(f"no datasheet matches '{args.query}'")
+        return 1
+    grep = _norm(args.grep) if args.grep else None
+    for pdf in hits:
+        toc = _parse_toc(_page_texts(pdf))
+        print(f"\n{_rel(pdf, root)}:")
+        if not toc:
+            print("  (no parseable table of contents)")
+            continue
+        for num, title, pg in toc:
+            if grep and grep not in _norm(title):
+                continue
+            indent = "  " * (num.count(".") + 1)
+            print(f"{indent}{num:<8} {title}  ·  p{pg}")
+    return 0
+
+
 def _cmd_locate(args) -> int:
     root = _root(args)
-    hits = _match(args.query, _datasheet_pdfs(root))
+    hits = _resolve_pdfs(args.query, root)
     if not hits:
         print(f"no datasheet matches '{args.query}'")
         return 1
     for pdf in hits:
-        print(f"\n{pdf.relative_to(root)}:")
+        print(f"\n{_rel(pdf, root)}:")
         pages = _page_texts(pdf)
         loc = _locate_pages(pages)
         toc = _toc_pages(loc)
@@ -207,20 +279,34 @@ def _cmd_locate(args) -> int:
 def _cmd_view(args) -> int:
     _need("pdftoppm")
     root = _root(args)
-    hits = _match(args.query, _datasheet_pdfs(root))
+    hits = _resolve_pdfs(args.query, root)
     if not hits:
         print(f"no datasheet matches '{args.query}'")
         return 1
     if len(hits) > 1:
         print(f"'{args.query}' matches several PDFs — narrow the query:")
         for p in hits:
-            print("  " + str(p.relative_to(root)))
+            print("  " + str(_rel(p, root)))
         return 1
     pdf = hits[0]
 
     pages: list[int] = []
     if args.pages:
         pages += [int(x) for x in re.split(r"[,\s]+", args.pages.strip()) if x]
+    if args.toc:                       # navigate by the doc's own table of contents
+        toc = _parse_toc(_page_texts(pdf))
+        q = args.toc.strip()
+        if re.fullmatch(r"\d+(?:\.\d+)*", q):
+            sel = [(n, t, pg) for n, t, pg in toc if n == q]
+        else:
+            qn = _norm(q)
+            sel = [(n, t, pg) for n, t, pg in toc if qn in _norm(t)]
+        if not sel:
+            print(f"no TOC section matches '{args.toc}' — run `kb datasheet toc {args.query}`")
+            return 2
+        for n, t, pg in sel:
+            print(f"  · {n} {t} -> p{pg}")
+        pages += [pg for _, _, pg in sel]
     if args.section:
         txt = _page_texts(pdf)
         loc = _locate_pages(txt)
@@ -247,7 +333,7 @@ def _cmd_view(args) -> int:
                 print(f"note: no page found for section '{s}' in {pdf.name}")
             pages += found
     if not pages:
-        print("nothing to render — pass --pages N,M or --section pinout,abs-max,…")
+        print("nothing to render — pass --pages N,M, --section pinout,…, or --toc <title|number>")
         return 2
 
     pages = sorted(set(pages))
@@ -258,7 +344,7 @@ def _cmd_view(args) -> int:
 
     cache = root / CACHE_DIRNAME
     rendered = [_render(pdf, pg, args.dpi, cache) for pg in pages]
-    print(f"{pdf.relative_to(root)} — {len(rendered)} page(s) at {args.dpi} dpi "
+    print(f"{_rel(pdf, root)} — {len(rendered)} page(s) at {args.dpi} dpi "
           f"(cached under {CACHE_DIRNAME}/):")
     for p in rendered:
         print("  " + str(p))
@@ -279,13 +365,20 @@ def add_parser(sub) -> None:
     pl.set_defaults(func=_cmd_list)
 
     plo = acts.add_parser("locate", help="report section -> page candidates (text only, cheap)")
-    plo.add_argument("query", help="part name / LCSC# substring (e.g. tps65150, C404969)")
+    plo.add_argument("query", help="part name / LCSC# substring, or a path to a PDF")
     plo.add_argument("--config", help=f"path to {cfgmod.CONFIG_NAME}")
     plo.set_defaults(func=_cmd_locate)
 
+    pt = acts.add_parser("toc", help="print the document's table of contents (text only, cheap)")
+    pt.add_argument("query", help="part name / LCSC# substring, or a path to a PDF (e.g. an app note)")
+    pt.add_argument("--grep", help="only show TOC titles containing this substring")
+    pt.add_argument("--config", help=f"path to {cfgmod.CONFIG_NAME}")
+    pt.set_defaults(func=_cmd_toc)
+
     pv = acts.add_parser("view", help="render section/pages to cached PNG(s) for the main agent")
-    pv.add_argument("query", help="part name / LCSC# substring")
+    pv.add_argument("query", help="part name / LCSC# substring, or a path to a PDF")
     pv.add_argument("--section", help="comma list of: " + ", ".join(SECTION_PATTERNS))
+    pv.add_argument("--toc", help="render a section by its TOC title or number, e.g. 'device summary' or 3.2")
     pv.add_argument("--pages", help="explicit pages, e.g. 3,4,12")
     pv.add_argument("--package", help="with --section pinout: only the figure for this package, e.g. LQFP48")
     pv.add_argument("--dpi", type=int, default=150, help="render DPI (default 150)")
