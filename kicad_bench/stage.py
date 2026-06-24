@@ -357,11 +357,15 @@ def write_status(sp: StagePaths, open_now: bool, locks: list[str],
                         for h in hooks)
         hl = ""
         if hooks_last:
-            hi = "".join(
-                f'<div class="res {"ok" if r["ok"] else "fail"}"><div class="resh">'
-                f'<span class="rbadge">{"OK" if r["ok"] else f"FAIL ({r['exit']})"}</span>'
-                f'<span class="lbl">{_esc(r["label"])}</span></div></div>'
-                for r in hooks_last["results"])
+            hi_parts = []
+            for r in hooks_last["results"]:
+                rcls = "ok" if r["ok"] else "fail"
+                rbadge = "OK" if r["ok"] else f"FAIL ({r['exit']})"
+                hi_parts.append(
+                    f'<div class="res {rcls}"><div class="resh">'
+                    f'<span class="rbadge">{rbadge}</span>'
+                    f'<span class="lbl">{_esc(r["label"])}</span></div></div>')
+            hi = "".join(hi_parts)
             hl = (f'<div class="age">ran {_esc(hooks_last["finished"][11:])}</div>' + hi)
         hooks_html = (f'<h2>On every quit ({len(hooks)})</h2>'
                       f'<div class="age">these re-run each time KiCad closes</div>'
