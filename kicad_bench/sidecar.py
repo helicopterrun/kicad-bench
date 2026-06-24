@@ -19,6 +19,7 @@ import json
 import threading
 from pathlib import Path
 
+from .core import cli
 from .core import config as cfgmod
 from . import audit
 
@@ -94,7 +95,7 @@ PAGE = """<!doctype html>
 </main>
 <iframe id="docframe" title="guide"></iframe>
 <script>
-let lastMtime=null, busy=false;
+let lastMtime=null, busy=false, curTab="audit", lastSchMtime=null;
 const $=id=>document.getElementById(id);
 const esc=s=>(s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 
@@ -156,6 +157,12 @@ async function poll(){
   try{ const r=await fetch("/api/mtime"); const m=(await r.json()).mtime;
     if(lastMtime!==null && m!==lastMtime){ loadAudit(false); }
   }catch(e){}
+  if(curTab==="preview"){
+    try{ const sm=(await (await fetch("/api/preview/sch.mtime")).json()).mtime;
+      if(lastSchMtime!==null && sm!==lastSchMtime){ docSrc=null; $("docframe").src="/preview/sch.pdf?t="+Date.now(); }
+      lastSchMtime=sm;
+    }catch(e){}
+  }
 }
 // ---- tabs: Audit dashboard + project doc guides (served from /doc/<i>) ----
 let docSrc=null;
@@ -164,11 +171,13 @@ function sizeFrame(){ const f=$("docframe");
 function switchTab(kind,i,btn){
   document.querySelectorAll("#tabs button").forEach(b=>b.classList.remove("active"));
   if(btn) btn.classList.add("active");
+  curTab=kind;
   const isAudit=(kind==="audit"), f=$("docframe");
   $("auditview").style.display=isAudit?"block":"none";
   $("auditctl").style.display=isAudit?"":"none";
-  if(isAudit){ f.style.display="none"; }
-  else{ const src="/doc/"+i; if(docSrc!==src){ f.src=src; docSrc=src; } f.style.display="block"; sizeFrame(); }
+  if(isAudit){ f.style.display="none"; return; }
+  const src = kind==="preview" ? "/preview/sch.pdf?t="+Date.now() : "/doc/"+i;
+  if(docSrc!==src){ f.src=src; docSrc=src; } f.style.display="block"; sizeFrame();
 }
 async function loadTabs(){
   let tabs=[]; try{ tabs=await (await fetch("/api/tabs")).json(); }catch(e){}
@@ -176,6 +185,7 @@ async function loadTabs(){
   const mk=(label,kind,i)=>{ const b=document.createElement("button"); b.textContent=label;
     b.onclick=()=>switchTab(kind,i,b); nav.appendChild(b); return b; };
   mk("Audit","audit",null).classList.add("active");
+  mk("Preview","preview",null);
   tabs.forEach((t,i)=>mk(t.title,"doc",i));
   if(!tabs.length) nav.style.display="none";
 }
@@ -196,6 +206,8 @@ class _State:
         self.lock = threading.Lock()
         self.cache: dict | None = None
         self.cache_mtime = None
+        self.sch_cache: bytes | None = None
+        self.sch_cache_mtime = None
 
     def _mtime(self):
         p = self.cfg.pcb
@@ -208,6 +220,32 @@ class _State:
                 return self.cache
             data = audit.sections_to_dict(audit.run_all(self.cfg), self.cfg)
             self.cache, self.cache_mtime = data, m
+            return data
+
+    def sch_mtime(self):
+        """Newest mtime across all sheets, so editing ANY child sheet invalidates the
+        preview (the root sheet's own mtime wouldn't change when a child changes)."""
+        rs = self.cfg.root_sch
+        if not rs:
+            return 0
+        mts = [p.stat().st_mtime for p in rs.parent.glob("*.kicad_sch") if p.exists()]
+        return max(mts) if mts else 0
+
+    def sch_pdf(self):
+        """Cached schematic→PDF render (bytes), refreshed when any sheet changes.
+        Returns None if there is no root schematic or the render fails — the preview
+        must never break the dashboard."""
+        if not self.cfg.root_sch:
+            return None
+        with self.lock:
+            m = self.sch_mtime()
+            if self.sch_cache is not None and self.sch_cache_mtime == m:
+                return self.sch_cache
+            try:
+                data = cli.export_sch_pdf(self.cfg.root_sch)
+            except Exception:  # noqa: BLE001
+                return None
+            self.sch_cache, self.sch_cache_mtime = data, m
             return data
 
 
@@ -235,6 +273,16 @@ def _make_handler(state: _State):
             elif path == "/api/tabs":
                 tabs = [{"title": t.title} for t in state.cfg.sidecar_tabs]
                 self._send(200, json.dumps(tabs).encode(), "application/json")
+            elif path == "/api/preview/sch.mtime":
+                self._send(200, json.dumps({"mtime": state.sch_mtime()}).encode(),
+                           "application/json")
+            elif path == "/preview/sch.pdf":
+                data = state.sch_pdf()
+                if not data:
+                    self._send(404, b"no schematic preview (no root_sch or render failed)",
+                               "text/plain")
+                else:
+                    self._send(200, data, "application/pdf")
             elif path.startswith("/doc/"):
                 try:
                     tab = state.cfg.sidecar_tabs[int(path[len("/doc/"):])]

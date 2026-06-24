@@ -125,3 +125,26 @@ def drc_violations(pcb: str | Path, severities=("error",)) -> list[dict]:
     """Return DRC violations at the given severities (each: type/severity/description)."""
     want = set(severities)
     return [v for v in drc_json(pcb).get("violations", []) if v.get("severity") in want]
+
+
+def export_sch_pdf(sch: str | Path) -> bytes:
+    """Render a (hierarchical) schematic to a single multi-page PDF and return its
+    bytes. This is the sidecar Preview-tab render path — it lets you see Claude's
+    latest schematic edit in the browser without reopening KiCad (there is no
+    schematic IPC in KiCad 10, so file-render is the only live-view option)."""
+    _require()
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+        out = f.name
+    r = subprocess.run(
+        ["kicad-cli", "sch", "export", "pdf", "--output", out, str(sch)],
+        capture_output=True, text=True,
+    )
+    try:
+        data = Path(out).read_bytes()
+    except OSError:
+        raise KicadCliError(f"schematic PDF export failed:\n{r.stderr.strip()}")
+    finally:
+        Path(out).unlink(missing_ok=True)
+    if not data:
+        raise KicadCliError(f"schematic PDF export produced no output:\n{r.stderr.strip()}")
+    return data

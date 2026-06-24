@@ -9,7 +9,8 @@ from __future__ import annotations
 import argparse
 import sys
 
-from . import __version__, audit, sidecar
+from . import __version__, audit, sidecar, stage
+from . import init as init_cmd
 from .core import cli
 from .quality import block_review, commit_gate, erc_triage, netlist_audit
 from .layout import (dfm_preflight, diffpair_audit, dru_guard, dru_lint,
@@ -17,7 +18,8 @@ from .layout import (dfm_preflight, diffpair_audit, dru_guard, dru_lint,
                      route_coverage, stackup_sync, track_conformance)
 
 _TOOLS = [
-    audit, sidecar,                                              # consolidated audit + live web sidecar
+    init_cmd,                                                    # one-command bring-up for a new board
+    audit, sidecar, stage,                                       # consolidated audit + live web sidecar + lock-aware queue
     erc_triage, netlist_audit, block_review, commit_gate,        # Priority 1
     netclass_coverage, netclass_sync, dfm_preflight, stackup_sync,  # Priority 2
     release_prep, dru_lint,
@@ -49,13 +51,15 @@ def _doctor(args) -> int:
     else:
         print("✗ kicad-cli not found on PATH")
         ok = False
-    found = cfgmod.find_config()
+    resolved = cfgmod.resolve_config_path(args.config)
     if args.config:
         print(f"· config (explicit): {args.config}")
-    elif found:
-        print(f"✓ config: {found}")
+    elif resolved:
+        via = "$KICAD_BENCH_CONFIG" if cfgmod.os.environ.get(cfgmod.ENV_VAR) else \
+              ("pointer" if cfgmod.find_pointer() else "upward search")
+        print(f"✓ config: {resolved}  (via {via})")
     else:
-        print("· no kicad-bench.toml found from cwd (pass --config)")
+        print("· no config found (run `kb init <repo>` or pass --config)")
     return 0 if ok else 2
 
 

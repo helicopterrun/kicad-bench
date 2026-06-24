@@ -15,6 +15,7 @@ All paths are returned absolute. Nothing here mutates project files.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import tomllib
@@ -22,6 +23,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 CONFIG_NAME = "kicad-bench.toml"
+POINTER_NAME = ".kicad-bench-config"   # in-repo file naming where the config lives
+ENV_VAR = "KICAD_BENCH_CONFIG"
 
 
 def find_config(start: Path | None = None) -> Path | None:
@@ -32,6 +35,51 @@ def find_config(start: Path | None = None) -> Path | None:
         if cand.exists():
             return cand
     return None
+
+
+def find_pointer(start: Path | None = None) -> Path | None:
+    """Walk up from `start` for a `.kicad-bench-config` pointer file and return the
+    config it names (first non-comment line; path resolved relative to the pointer).
+
+    This is how a design repo whose config lives elsewhere (e.g. in the kicad-bench
+    repo's configs/) advertises that location without an env var. Returns None if no
+    pointer is found or the named config doesn't exist.
+    """
+    start = (start or Path.cwd()).resolve()
+    for d in [start, *start.parents]:
+        ptr = d / POINTER_NAME
+        if not ptr.exists():
+            continue
+        for line in ptr.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            p = Path(line)
+            p = p if p.is_absolute() else (d / p)
+            return p.resolve() if p.exists() else None
+        return None
+    return None
+
+
+def resolve_config_path(explicit: str | None = None, start: Path | None = None) -> Path | None:
+    """Resolve which kicad-bench.toml to use, in priority order:
+
+      1. an explicit --config path,
+      2. the $KICAD_BENCH_CONFIG env var (if it points at an existing file),
+      3. a `.kicad-bench-config` pointer file found walking up from cwd,
+      4. a `kicad-bench.toml` found walking up from cwd.
+
+    Returns None only if nothing is found (and no explicit path was given).
+    """
+    if explicit:
+        return Path(explicit)
+    env = os.environ.get(ENV_VAR)
+    if env and Path(env).exists():
+        return Path(env).resolve()
+    ptr = find_pointer(start)
+    if ptr:
+        return ptr
+    return find_config(start)
 
 
 @dataclass
@@ -210,16 +258,15 @@ def load(config_path: Path) -> Config:
 
 
 def load_or_exit(explicit: str | None) -> Config:
-    """Resolve the config from --config or by upward search; exit(2) if absent."""
-    if explicit:
-        p = Path(explicit)
-        if not p.exists():
-            sys.exit(f"error: config not found: {p}")
-        return load(p)
-    found = find_config()
-    if not found:
+    """Resolve the config (--config, $KICAD_BENCH_CONFIG, .kicad-bench-config pointer,
+    or upward search for kicad-bench.toml) and load it; exit(2) if absent."""
+    if explicit and not Path(explicit).exists():
+        sys.exit(f"error: config not found: {explicit}")
+    p = resolve_config_path(explicit)
+    if not p or not p.exists():
         sys.exit(
-            f"error: no {CONFIG_NAME} found in this or any parent directory. "
-            "Pass --config PATH or add one (see kicad-bench README)."
+            f"error: no {CONFIG_NAME} found via --config, ${ENV_VAR}, a "
+            f"{POINTER_NAME} pointer, or upward search. Run `kb init <repo>` or pass "
+            "--config PATH (see kicad-bench README)."
         )
-    return load(found)
+    return load(p)
