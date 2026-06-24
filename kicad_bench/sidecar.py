@@ -229,7 +229,7 @@ PCB2D_PAGE = """<!doctype html><html><head><meta charset="utf-8"><style>""" + _P
  body{display:flex;flex-direction:column}
  #bar{flex-wrap:wrap}
  #stagewrap{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;
-   padding:10px;box-sizing:border-box}
+   padding:10px;box-sizing:border-box;background:#001023}
  #stage{position:relative;width:100%;height:100%}
  #stage.mir{transform:scaleX(-1)}
  #stage img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
@@ -246,18 +246,20 @@ PCB2D_PAGE = """<!doctype html><html><head><meta charset="utf-8"><style>""" + _P
 </div>
 <div id="stagewrap"><div id="stage"></div></div>
 <script>
+// Colors are the KiCad "Paimon-Dark" theme's pcbnew `board` layer colors, so the 2D
+// view matches eeschema/pcbnew under that theme (board bg #001023 set in CSS above).
 const LAYERS=[
- {id:'B.Cu',         name:'B.Cu',   color:'4D7FC4'},
- {id:'In2.Cu',       name:'In2.Cu', color:'C200C2'},
- {id:'In1.Cu',       name:'In1.Cu', color:'C2C200'},
- {id:'F.Cu',         name:'F.Cu',   color:'C83434'},
- {id:'B.Mask',       name:'B.Mask', color:'7C4F8E'},
- {id:'F.Mask',       name:'F.Mask', color:'E552E5'},
- {id:'B.Silkscreen', name:'B.Silk', color:'AAAAAA'},
- {id:'F.Silkscreen', name:'F.Silk', color:'EEEEEE'},
- {id:'B.Fab',        name:'B.Fab',  color:'80857F'},
- {id:'F.Fab',        name:'F.Fab',  color:'C2A36B'},
- {id:'Edge.Cuts',    name:'Edge',   color:'F0E68C'},
+ {id:'B.Cu',         name:'B.Cu',   color:'FF8B44'},
+ {id:'In2.Cu',       name:'In2.Cu', color:'A9DD00'},
+ {id:'In1.Cu',       name:'In1.Cu', color:'18D4FF'},
+ {id:'F.Cu',         name:'F.Cu',   color:'1B90B3'},
+ {id:'B.Mask',       name:'B.Mask', color:'005D7C'},
+ {id:'F.Mask',       name:'F.Mask', color:'AE4E00'},
+ {id:'B.Silkscreen', name:'B.Silk', color:'C0D4D4'},
+ {id:'F.Silkscreen', name:'F.Silk', color:'CFE0E5'},
+ {id:'B.Fab',        name:'B.Fab',  color:'987D7E'},
+ {id:'F.Fab',        name:'F.Fab',  color:'798596'},
+ {id:'Edge.Cuts',    name:'Edge',   color:'D0D2CD'},
 ];
 const DEFAULT_ON=['F.Cu','F.Silkscreen','Edge.Cuts'];
 const stage=document.getElementById('stage'), imgs={}, cbs={};
