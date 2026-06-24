@@ -148,3 +148,57 @@ def export_sch_pdf(sch: str | Path) -> bytes:
     if not data:
         raise KicadCliError(f"schematic PDF export produced no output:\n{r.stderr.strip()}")
     return data
+
+
+def export_pcb_svg(pcb: str | Path,
+                   layers: str = "F.Cu,F.Silkscreen,Edge.Cuts") -> bytes:
+    """Render the PCB to one cropped, drawing-sheet-free SVG (the given layers merged)
+    and return its bytes. Fast (~2s) — this drives the sidecar's live 2D PCB-preview
+    tab, refreshing on board save just like the schematic PDF render."""
+    _require()
+    with tempfile.NamedTemporaryFile(suffix=".svg", delete=False) as f:
+        out = f.name
+    r = subprocess.run(
+        ["kicad-cli", "pcb", "export", "svg",
+         "--mode-single",            # -o is the exact output file (not a dir)
+         "--layers", layers,
+         "--page-size-mode", "2",    # crop to board area only
+         "--exclude-drawing-sheet",  # no title-block frame
+         "--output", out, str(pcb)],
+        capture_output=True, text=True,
+    )
+    try:
+        data = Path(out).read_bytes()
+    except OSError:
+        raise KicadCliError(f"PCB SVG export failed:\n{r.stderr.strip()}")
+    finally:
+        Path(out).unlink(missing_ok=True)
+    if not data:
+        raise KicadCliError(f"PCB SVG export produced no output:\n{r.stderr.strip()}")
+    return data
+
+
+def render_pcb_3d(pcb: str | Path, side: str = "top",
+                  width: int = 1000, height: int = 800,
+                  quality: str = "basic") -> bytes:
+    """Raytrace the PCB to a 3D-view PNG and return its bytes. SLOW (~30s, dominated
+    by 3D-model load) — the sidecar caches the result and re-renders in a background
+    thread on board save rather than blocking each page-load."""
+    _require()
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        out = f.name
+    r = subprocess.run(
+        ["kicad-cli", "pcb", "render", "--side", side, "--quality", quality,
+         "--width", str(width), "--height", str(height),
+         "--output", out, str(pcb)],
+        capture_output=True, text=True,
+    )
+    try:
+        data = Path(out).read_bytes()
+    except OSError:
+        raise KicadCliError(f"PCB 3D render failed:\n{r.stderr.strip()}")
+    finally:
+        Path(out).unlink(missing_ok=True)
+    if not data:
+        raise KicadCliError(f"PCB 3D render produced no output:\n{r.stderr.strip()}")
+    return data
