@@ -233,17 +233,28 @@ PCB2D_PAGE = """<!doctype html><html><head><meta charset="utf-8"><style>""" + _P
  #stage{position:relative;width:100%;height:100%}
  #stage.mir{transform:scaleX(-1)}
  #stage img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
- #layers{display:flex;flex-wrap:wrap;align-items:center}
- .lyr{display:inline-flex;align-items:center;gap:4px;margin:0 6px 0 0;cursor:pointer;
-   color:#d4d7dd;font-size:12px}
- .lyr input{margin:0}
- .sw{width:10px;height:10px;border-radius:2px;display:inline-block;border:1px solid #0006}
+ #bar button{padding:8px 14px}
+ #backdrop{position:fixed;inset:0;background:#0007;display:none;z-index:9}
+ #menu{position:fixed;z-index:10;display:none;background:#232427;border:1px solid #34363b;
+   border-radius:10px;padding:6px;min-width:220px;max-height:78vh;overflow:auto;
+   box-shadow:0 10px 30px #000a}
+ #menu.open,#backdrop.open{display:block}
+ #menu .row{display:flex;align-items:center;gap:11px;padding:11px 12px;border-radius:7px;
+   cursor:pointer;user-select:none;font-size:15px;color:#d4d7dd}
+ #menu .row.on{background:#1e2a38}
+ #menu .row:active{background:#2d2f34}
+ #menu .sw{width:17px;height:17px;border-radius:3px;border:1px solid #0006;flex:0 0 auto}
+ #menu .nm{flex:1}
+ #menu .ck{width:18px;text-align:center;color:#7fa8d8;opacity:0}
+ #menu .row.on .ck{opacity:1}
 </style></head><body>
 <div id="bar"><span class="lbl">PCB 2D</span>
   <button id="bt" class="active" onclick="preset('top')">Top</button>
   <button id="bb" onclick="preset('bottom')">Bottom</button>
-  <span id="layers"></span>
+  <button id="lbtn" onclick="toggleMenu()">Layers ▾</button>
 </div>
+<div id="backdrop" onclick="closeMenu()"></div>
+<div id="menu"></div>
 <div id="stagewrap"><div id="stage"></div></div>
 <script>
 // Colors are the KiCad "Paimon-Dark" theme's pcbnew `board` layer colors, so the 2D
@@ -262,7 +273,7 @@ const LAYERS=[
  {id:'Edge.Cuts',    name:'Edge',   color:'D0D2CD'},
 ];
 const DEFAULT_ON=['F.Cu','F.Silkscreen','Edge.Cuts'];
-const stage=document.getElementById('stage'), imgs={}, cbs={};
+const stage=document.getElementById('stage'), imgs={}, rows={};
 let mt=0, mirror=false;
 function src(L){ return '/preview/pcb-layer.svg?layer='+encodeURIComponent(L.id)+'&color='+L.color+'&t='+mt; }
 function show(L,on){
@@ -270,32 +281,40 @@ function show(L,on){
     if(!im){ im=new Image(); im.alt=L.id; im.style.zIndex=LAYERS.indexOf(L); imgs[L.id]=im; stage.appendChild(im); }
     im.src=src(L); im.style.display='block';
   }else if(imgs[L.id]){ imgs[L.id].style.display='none'; }
+  if(rows[L.id]) rows[L.id].classList.toggle('on',on);
 }
-function build(){
-  const box=document.getElementById('layers');
+function buildMenu(){
+  const menu=document.getElementById('menu');
   LAYERS.forEach(L=>{
-    const lab=document.createElement('label'); lab.className='lyr';
-    const cb=document.createElement('input'); cb.type='checkbox'; cb.checked=DEFAULT_ON.includes(L.id);
-    const sw=document.createElement('span'); sw.className='sw'; sw.style.background='#'+L.color;
-    cb.onchange=()=>show(L,cb.checked); cbs[L.id]=cb;
-    lab.appendChild(cb); lab.appendChild(sw); lab.appendChild(document.createTextNode(L.name));
-    box.appendChild(lab);
+    const row=document.createElement('div'); row.className='row';
+    row.innerHTML='<span class="sw" style="background:#'+L.color+'"></span>'+
+      '<span class="nm">'+L.name+'</span><span class="ck">✓</span>';
+    row.onclick=()=>show(L,!row.classList.contains('on'));
+    rows[L.id]=row; menu.appendChild(row);
   });
 }
 function preset(p){
   const want = p==='bottom' ? ['B.Cu','B.Silkscreen','Edge.Cuts'] : ['F.Cu','F.Silkscreen','Edge.Cuts'];
-  LAYERS.forEach(L=>{ const on=want.includes(L.id); cbs[L.id].checked=on; show(L,on); });
+  LAYERS.forEach(L=>show(L,want.includes(L.id)));
   mirror=(p==='bottom'); stage.classList.toggle('mir',mirror);
   document.getElementById('bt').classList.toggle('active',p==='top');
   document.getElementById('bb').classList.toggle('active',p==='bottom');
 }
+function toggleMenu(){ document.getElementById('menu').classList.contains('open')?closeMenu():openMenu(); }
+function openMenu(){ const b=document.getElementById('lbtn').getBoundingClientRect(),
+  m=document.getElementById('menu');
+  m.style.left=Math.max(6,Math.min(b.left,innerWidth-240))+'px'; m.style.top=(b.bottom+5)+'px';
+  m.classList.add('open'); document.getElementById('backdrop').classList.add('open');
+}
+function closeMenu(){ document.getElementById('menu').classList.remove('open');
+  document.getElementById('backdrop').classList.remove('open'); }
 async function tick(){
   if(document.hidden) return;
   try{ const m=(await (await fetch('/api/mtime')).json()).mtime;
     if(m!==mt){ mt=m; LAYERS.forEach(L=>{ const im=imgs[L.id]; if(im&&im.style.display!=='none') im.src=src(L); }); }
   }catch(e){}
 }
-build();
+buildMenu();
 LAYERS.forEach(L=>{ if(DEFAULT_ON.includes(L.id)) show(L,true); });
 tick(); setInterval(tick,3000);
 </script>
