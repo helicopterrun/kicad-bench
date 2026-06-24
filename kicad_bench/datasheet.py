@@ -89,12 +89,40 @@ def _page_texts(pdf: Path) -> list[str]:
     return r.stdout.split("\f")
 
 
-def _locate(pdf: Path) -> dict[str, list[int]]:
-    pages = _page_texts(pdf)
+# A package-pinout FIGURE caption, e.g. "Figure 7. LQFP48 package pinout" -> "LQFP48".
+# These pages hold the actual pin-placement DIAGRAM, so rank them above the multi-page
+# pin-description TABLE (which only matches the generic "pin description" wording).
+_FIG_PINOUT = re.compile(
+    r"figure\s+\d+\s*[.:]?\s*([A-Za-z0-9/_+\- ]+?)\s*(?:package\s+)?pin[\s-]?out", re.I)
+# A real pin-placement diagram page shows a handful of packages; a page that lists this
+# many distinct pinout captions is the "List of figures" index, not a diagram — skip it.
+_MAX_FIG_PER_PAGE = 4
+
+
+def _locate_pages(pages: list[str]) -> dict[str, list[int]]:
     out: dict[str, list[int]] = {}
     for name, pat in SECTION_PATTERNS.items():
         rx = re.compile(pat, re.I)
         out[name] = [i + 1 for i, t in enumerate(pages) if rx.search(t)]
+    return out
+
+
+def _locate(pdf: Path) -> dict[str, list[int]]:
+    return _locate_pages(_page_texts(pdf))
+
+
+def _pinout_figures(pages: list[str]) -> list[tuple[int, list[str]]]:
+    """Pages carrying a package-pinout FIGURE caption, with the package name(s) on each —
+    the diagrams to render, as opposed to the pin-description table pages."""
+    out: list[tuple[int, list[str]]] = []
+    for i, t in enumerate(pages):
+        pkgs: list[str] = []
+        for m in _FIG_PINOUT.finditer(t):
+            name = re.sub(r"\s+", " ", m.group(1)).strip(" .")
+            if name and len(name) <= 32 and name.lower() != "package" and name not in pkgs:
+                pkgs.append(name)
+        if pkgs and len(pkgs) < _MAX_FIG_PER_PAGE:
+            out.append((i + 1, pkgs))
     return out
 
 
@@ -155,9 +183,22 @@ def _cmd_locate(args) -> int:
         return 1
     for pdf in hits:
         print(f"\n{pdf.relative_to(root)}:")
-        loc = _locate(pdf)
+        pages = _page_texts(pdf)
+        loc = _locate_pages(pages)
         toc = _toc_pages(loc)
+        figs = _pinout_figures(pages)
+        fig_pages = {p for p, _ in figs}
+        if figs:                            # pinout figures (with package) first, then table
+            print("  pinout figs  " + ", ".join(f"p{p} {'/'.join(pk)}" for p, pk in figs))
+            tbl = [p for p in loc["pinout"] if p not in toc and p not in fig_pages]
+            if tbl:
+                print(f"  pinout tbl   {tbl}")
+        else:
+            ps = [p for p in loc["pinout"] if p not in toc]
+            print(f"  {'pinout':12} {ps if ps else '—'}")
         for name in SECTION_PATTERNS:
+            if name == "pinout":
+                continue
             ps = [p for p in loc[name] if p not in toc]
             print(f"  {name:12} {ps if ps else '—'}")
     return 0
@@ -181,13 +222,27 @@ def _cmd_view(args) -> int:
     if args.pages:
         pages += [int(x) for x in re.split(r"[,\s]+", args.pages.strip()) if x]
     if args.section:
-        loc = _locate(pdf)
+        txt = _page_texts(pdf)
+        loc = _locate_pages(txt)
         toc = _toc_pages(loc)
+        figs = _pinout_figures(txt)
         for s in [x.strip() for x in args.section.split(",") if x.strip()]:
             if s not in SECTION_PATTERNS:
                 print(f"unknown section '{s}' (known: {', '.join(SECTION_PATTERNS)})")
                 return 2
-            found = [p for p in loc[s] if p not in toc]
+            if s == "pinout" and figs:                  # render the DIAGRAM pages, not the table
+                sel = figs
+                if args.package:
+                    q = _norm(args.package)
+                    sel = [(p, pk) for p, pk in figs if any(q in _norm(x) for x in pk)]
+                    if not sel:
+                        avail = sorted({x for _, pk in figs for x in pk})
+                        print(f"no pinout figure matches package '{args.package}' "
+                              f"(available: {', '.join(avail)})")
+                        return 2
+                found = [p for p, _ in sel]
+            else:
+                found = [p for p in loc[s] if p not in toc]
             if not found:
                 print(f"note: no page found for section '{s}' in {pdf.name}")
             pages += found
@@ -232,6 +287,7 @@ def add_parser(sub) -> None:
     pv.add_argument("query", help="part name / LCSC# substring")
     pv.add_argument("--section", help="comma list of: " + ", ".join(SECTION_PATTERNS))
     pv.add_argument("--pages", help="explicit pages, e.g. 3,4,12")
+    pv.add_argument("--package", help="with --section pinout: only the figure for this package, e.g. LQFP48")
     pv.add_argument("--dpi", type=int, default=150, help="render DPI (default 150)")
     pv.add_argument("--config", help=f"path to {cfgmod.CONFIG_NAME}")
     pv.set_defaults(func=_cmd_view)
