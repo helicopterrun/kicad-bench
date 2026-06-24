@@ -18,6 +18,7 @@ import http.server
 import json
 import threading
 from pathlib import Path
+from urllib.parse import parse_qs
 
 from .core import cli
 from .core import config as cfgmod
@@ -155,10 +156,7 @@ function render(d){
 async function poll(){
   if(!$("auto").checked||busy) return;
   try{ const r=await fetch("/api/mtime"); const m=(await r.json()).mtime;
-    if(lastMtime!==null && m!==lastMtime){
-      loadAudit(false);
-      if(curTab==="pcb2d"){ docSrc=null; $("docframe").src="/preview/pcb.svg?t="+Date.now(); }
-    }
+    if(lastMtime!==null && m!==lastMtime){ loadAudit(false); }
   }catch(e){}
   if(curTab==="preview"){
     try{ const sm=(await (await fetch("/api/preview/sch.mtime")).json()).mtime;
@@ -181,7 +179,7 @@ function switchTab(kind,i,btn){
   if(isAudit){ f.style.display="none"; return; }
   let src;
   if(kind==="preview") src="/preview/sch.pdf?t="+Date.now();
-  else if(kind==="pcb2d") src="/preview/pcb.svg?t="+Date.now();
+  else if(kind==="pcb2d") src="/preview/pcb2d?t="+Date.now();
   else if(kind==="pcb3d") src="/preview/pcb3d?t="+Date.now();
   else src="/doc/"+i;
   if(docSrc!==src){ f.src=src; docSrc=src; } f.style.display="block"; sizeFrame();
@@ -208,34 +206,86 @@ loadAudit(false);
 </body></html>"""
 
 
-# Served inside the iframe for the "PCB 3D" tab. The raytrace is ~30s, so this page
-# polls the render status, shows a "rendering…" note, and swaps in the cached PNG when
-# ready — keeping the last good image on screen while a fresh one renders after a save.
-PCB3D_PAGE = """<!doctype html><html><head><meta charset="utf-8"><style>
- html,body{margin:0;height:100%;background:#1b1c1f;color:#8a8f98;
+# Shared toolbar/style for the two PCB-preview wrapper pages (dark bg + Top/Bottom toggle).
+_PCB_CSS = """
+ html,body{margin:0;height:100%;background:#1b1c1f;color:#d4d7dd;
    font:13px/1.5 ui-monospace,Menlo,Consolas,monospace}
- #wrap{height:100%;display:flex;flex-direction:column;align-items:center;
-   justify-content:center;gap:14px;padding:12px;box-sizing:border-box}
- img{max-width:100%;max-height:100%;object-fit:contain;display:none;border-radius:6px}
- #msg{padding:8px 14px;border:1px solid #34363b;border-radius:6px;background:#232427}
- #msg.err{color:#ff7b7b;border-color:#4a2a2a}
- .dim{opacity:.55}
+ #bar{position:sticky;top:0;display:flex;gap:8px;align-items:center;
+   padding:8px 12px;background:#16171a;border-bottom:1px solid #34363b}
+ #bar .lbl{color:#8a8f98}
+ button{background:#2d2f34;color:#d4d7dd;border:1px solid #34363b;border-radius:6px;
+   padding:4px 12px;cursor:pointer;font:inherit}
+ button.active{background:#1e2a38;border-color:#7fa8d8;color:#fff}
+ img{max-width:100%;max-height:100%;object-fit:contain}
+ .dim{opacity:.55}"""
+
+# "PCB 2D" tab — a dark-background wrapper around the kicad-cli SVG export with a
+# Top/Bottom toggle. It polls the board mtime and swaps the <img> on save, so the toggle
+# state survives a re-render (reloading the iframe would reset it). The bottom side is
+# mirrored server-side; layer colors are theme colors meant for this dark canvas.
+PCB2D_PAGE = """<!doctype html><html><head><meta charset="utf-8"><style>""" + _PCB_CSS + """
+ #wrap{height:calc(100% - 39px);display:flex;align-items:center;justify-content:center;
+   padding:10px;box-sizing:border-box}
 </style></head><body>
-<div id="wrap"><img id="im" alt="PCB 3D render"><div id="msg">starting 3D render…</div></div>
+<div id="bar"><span class="lbl">PCB 2D</span>
+  <button id="bt" class="active" onclick="setSide('top')">Top</button>
+  <button id="bb" onclick="setSide('bottom')">Bottom</button>
+</div>
+<div id="wrap"><img id="im" alt="PCB 2D"></div>
 <script>
-let cur=null;
-const im=document.getElementById('im'), msg=document.getElementById('msg');
+let side='top', mt=null;
+const im=document.getElementById('im');
+function paint(){ im.src='/preview/pcb.svg?side='+side+'&t='+(mt||0); }
+function setSide(s){ side=s;
+  document.getElementById('bt').classList.toggle('active',s==='top');
+  document.getElementById('bb').classList.toggle('active',s==='bottom');
+  paint();
+}
 async function tick(){
   if(document.hidden) return;
-  let s; try{ s=await (await fetch('/api/preview/pcb3d')).json(); }
+  try{ const m=(await (await fetch('/api/mtime')).json()).mtime;
+    if(m!==mt){ mt=m; paint(); }
+  }catch(e){}
+}
+paint(); tick(); setInterval(tick,3000);
+</script>
+</body></html>"""
+
+# "PCB 3D" tab. The raytrace is ~30s, so this page polls the render status, shows a
+# "rendering…" note, and swaps in the cached PNG when ready — keeping the last good image
+# on screen while a fresh one renders after a save. Top/Bottom each render independently
+# (cached server-side per side).
+PCB3D_PAGE = """<!doctype html><html><head><meta charset="utf-8"><style>""" + _PCB_CSS + """
+ #wrap{height:calc(100% - 39px);display:flex;flex-direction:column;align-items:center;
+   justify-content:center;gap:14px;padding:12px;box-sizing:border-box}
+ img{display:none;border-radius:6px}
+ #msg{padding:8px 14px;border:1px solid #34363b;border-radius:6px;background:#232427}
+ #msg.err{color:#ff7b7b;border-color:#4a2a2a}
+</style></head><body>
+<div id="bar"><span class="lbl">PCB 3D</span>
+  <button id="bt" class="active" onclick="setSide('top')">Top</button>
+  <button id="bb" onclick="setSide('bottom')">Bottom</button>
+</div>
+<div id="wrap"><img id="im" alt="PCB 3D render"><div id="msg">starting 3D render…</div></div>
+<script>
+let side='top', cur=null;
+const im=document.getElementById('im'), msg=document.getElementById('msg');
+function setSide(s){ side=s; cur=null; im.style.display='none';
+  document.getElementById('bt').classList.toggle('active',s==='top');
+  document.getElementById('bb').classList.toggle('active',s==='bottom');
+  tick();
+}
+async function tick(){
+  if(document.hidden) return;
+  let s; try{ s=await (await fetch('/api/preview/pcb3d?side='+side)).json(); }
   catch(e){ msg.className='err'; msg.textContent='3D preview unavailable'; return; }
   if(s.status==='ready'){
-    if(cur!==s.mtime){ cur=s.mtime; im.src='/preview/pcb.png?t='+s.mtime; }
-    im.style.display='block'; msg.className='dim';
-    msg.textContent='3D render · top · live (re-renders on board save)';
+    if(cur!==s.mtime){ cur=s.mtime; im.src='/preview/pcb.png?side='+side+'&t='+s.mtime; }
+    im.style.display='block'; im.classList.remove('dim'); msg.className='dim';
+    msg.textContent='3D render · '+side+' · live (re-renders on board save)';
   }else if(s.status==='rendering'){
     msg.className=cur?'dim':''; im.classList.toggle('dim',!!cur);
-    msg.textContent=cur?'re-rendering 3D after save… (~30s)':'rendering 3D board… (~30s — first load and after each save)';
+    msg.textContent=cur?'re-rendering 3D after save… (~30s)':'rendering 3D '+side+'… (~30s — first load and after each save)';
   }else if(s.status==='error'){
     msg.className='err'; msg.textContent='3D render failed: '+(s.error||'unknown');
   }else{
@@ -255,14 +305,11 @@ class _State:
         self.cache_mtime = None
         self.sch_cache: bytes | None = None
         self.sch_cache_mtime = None
-        # 2D PCB preview (fast, synchronous, board-mtime cached)
-        self.pcb_svg_cache: bytes | None = None
-        self.pcb_svg_mtime = None
-        # 3D PCB preview (slow ~30s — rendered in a background thread, never blocks a request)
-        self.pcb_png_cache: bytes | None = None
-        self.pcb_png_mtime = None
-        self.pcb_png_rendering = False
-        self.pcb_png_error: str | None = None
+        # 2D PCB preview (fast, synchronous, board-mtime cached) — keyed by side
+        self._svg: dict = {}                       # side -> (mtime, bytes)
+        # 3D PCB preview (slow ~30s — background thread, never blocks a request) — per side
+        self._png = {s: {"cache": None, "mtime": None, "rendering": False, "error": None}
+                     for s in ("top", "bottom")}
 
     def _mtime(self):
         p = self.cfg.pcb
@@ -303,59 +350,63 @@ class _State:
             self.sch_cache, self.sch_cache_mtime = data, m
             return data
 
-    def pcb_svg(self):
-        """Cached 2D PCB SVG (bytes), refreshed when the board changes. Fast enough
-        (~2s) to render on the request thread. Returns None if there is no board or
-        the render fails — the preview must never break the dashboard."""
+    def pcb_svg(self, side="top"):
+        """Cached 2D PCB SVG (bytes) for the given side, refreshed when the board
+        changes. Fast enough (~2s) to render on the request thread. Returns None if
+        there is no board or the render fails — the preview must never break the
+        dashboard."""
         if not self.cfg.pcb:
             return None
         m = self._mtime()
         with self.lock:
-            if self.pcb_svg_cache is not None and self.pcb_svg_mtime == m:
-                return self.pcb_svg_cache
+            c = self._svg.get(side)
+            if c is not None and c[0] == m:
+                return c[1]
         try:  # render OUTSIDE the lock — don't stall audit/mtime requests
-            data = cli.export_pcb_svg(self.cfg.pcb)
+            data = cli.export_pcb_svg(self.cfg.pcb, side=side)
         except Exception:  # noqa: BLE001
             return None
         with self.lock:
-            self.pcb_svg_cache, self.pcb_svg_mtime = data, m
+            self._svg[side] = (m, data)
         return data
 
-    def pcb_3d_state(self) -> dict:
-        """Status of the cached 3D render for the CURRENT board. Kicks off a
+    def pcb_3d_state(self, side="top") -> dict:
+        """Status of the cached 3D render of the given board side. Kicks off a
         background render if the cache is missing/stale and none is already running,
         so the request returns instantly. status: ready|rendering|error|none."""
         if not self.cfg.pcb:
-            return {"status": "none", "mtime": 0}
+            return {"status": "none", "mtime": 0, "side": side}
         m = self._mtime()
+        st = self._png[side]
         with self.lock:
-            if self.pcb_png_cache is not None and self.pcb_png_mtime == m:
-                return {"status": "ready", "mtime": m}
-            if self.pcb_png_rendering:
-                return {"status": "rendering", "mtime": m}
-            if self.pcb_png_error is not None and self.pcb_png_mtime == m:
-                return {"status": "error", "mtime": m, "error": self.pcb_png_error}
-            self.pcb_png_rendering = True
-        threading.Thread(target=self._render_3d_bg, args=(m,), daemon=True).start()
-        return {"status": "rendering", "mtime": m}
+            if st["cache"] is not None and st["mtime"] == m:
+                return {"status": "ready", "mtime": m, "side": side}
+            if st["rendering"]:
+                return {"status": "rendering", "mtime": m, "side": side}
+            if st["error"] is not None and st["mtime"] == m:
+                return {"status": "error", "mtime": m, "side": side, "error": st["error"]}
+            st["rendering"] = True
+        threading.Thread(target=self._render_3d_bg, args=(side, m), daemon=True).start()
+        return {"status": "rendering", "mtime": m, "side": side}
 
-    def _render_3d_bg(self, m):
+    def _render_3d_bg(self, side, m):
         err = None
         data = None
         try:
-            data = cli.render_pcb_3d(self.cfg.pcb)
+            data = cli.render_pcb_3d(self.cfg.pcb, side=side)
         except Exception as e:  # noqa: BLE001
             err = str(e)
         with self.lock:
+            st = self._png[side]
             if data is not None:
-                self.pcb_png_cache, self.pcb_png_mtime, self.pcb_png_error = data, m, None
+                st["cache"], st["mtime"], st["error"] = data, m, None
             else:
-                self.pcb_png_mtime, self.pcb_png_error = m, err
-            self.pcb_png_rendering = False
+                st["mtime"], st["error"] = m, err
+            st["rendering"] = False
 
-    def pcb_png(self):
+    def pcb_png(self, side="top"):
         with self.lock:
-            return self.pcb_png_cache
+            return self._png[side]["cache"]
 
 
 def _make_handler(state: _State):
@@ -369,6 +420,11 @@ def _make_handler(state: _State):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+        def _side(self):
+            q = self.path.split("?", 1)[1] if "?" in self.path else ""
+            s = (parse_qs(q).get("side", ["top"])[0]).lower()
+            return s if s in ("top", "bottom") else "top"
 
         def do_GET(self):
             path = self.path.split("?")[0]
@@ -392,8 +448,10 @@ def _make_handler(state: _State):
                                "text/plain")
                 else:
                     self._send(200, data, "application/pdf")
+            elif path == "/preview/pcb2d":
+                self._send(200, PCB2D_PAGE.encode(), "text/html; charset=utf-8")
             elif path == "/preview/pcb.svg":
-                data = state.pcb_svg()
+                data = state.pcb_svg(self._side())
                 if not data:
                     self._send(404, b"no PCB preview (no board or render failed)", "text/plain")
                 else:
@@ -401,9 +459,10 @@ def _make_handler(state: _State):
             elif path == "/preview/pcb3d":
                 self._send(200, PCB3D_PAGE.encode(), "text/html; charset=utf-8")
             elif path == "/api/preview/pcb3d":
-                self._send(200, json.dumps(state.pcb_3d_state()).encode(), "application/json")
+                self._send(200, json.dumps(state.pcb_3d_state(self._side())).encode(),
+                           "application/json")
             elif path == "/preview/pcb.png":
-                data = state.pcb_png()
+                data = state.pcb_png(self._side())
                 if not data:
                     self._send(404, b"3D render not ready", "text/plain")
                 else:

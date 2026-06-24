@@ -150,23 +150,28 @@ def export_sch_pdf(sch: str | Path) -> bytes:
     return data
 
 
-def export_pcb_svg(pcb: str | Path,
-                   layers: str = "F.Cu,F.Silkscreen,Edge.Cuts") -> bytes:
-    """Render the PCB to one cropped, drawing-sheet-free SVG (the given layers merged)
-    and return its bytes. Fast (~2s) — this drives the sidecar's live 2D PCB-preview
-    tab, refreshing on board save just like the schematic PDF render."""
+def export_pcb_svg(pcb: str | Path, side: str = "top") -> bytes:
+    """Render one cropped, drawing-sheet-free SVG of the given board side (copper +
+    silkscreen + edge cuts, merged) and return its bytes. The bottom side is mirrored
+    so it reads as if you flipped the board over. Layer colors come from the PCB
+    editor theme (tuned for a dark canvas), so the sidecar shows it on a dark bg.
+    Fast (~2s) — drives the live 2D PCB-preview tab, refreshing on board save."""
     _require()
+    if side == "bottom":
+        layers, mirror = "B.Cu,B.Silkscreen,Edge.Cuts", True
+    else:
+        layers, mirror = "F.Cu,F.Silkscreen,Edge.Cuts", False
     with tempfile.NamedTemporaryFile(suffix=".svg", delete=False) as f:
         out = f.name
-    r = subprocess.run(
-        ["kicad-cli", "pcb", "export", "svg",
-         "--mode-single",            # -o is the exact output file (not a dir)
-         "--layers", layers,
-         "--page-size-mode", "2",    # crop to board area only
-         "--exclude-drawing-sheet",  # no title-block frame
-         "--output", out, str(pcb)],
-        capture_output=True, text=True,
-    )
+    cmd = ["kicad-cli", "pcb", "export", "svg",
+           "--mode-single",            # -o is the exact output file (not a dir)
+           "--layers", layers,
+           "--page-size-mode", "2",    # crop to board area only
+           "--exclude-drawing-sheet"]  # no title-block frame
+    if mirror:
+        cmd.append("--mirror")         # show the bottom as if flipped over
+    cmd += ["--output", out, str(pcb)]
+    r = subprocess.run(cmd, capture_output=True, text=True)
     try:
         data = Path(out).read_bytes()
     except OSError:
