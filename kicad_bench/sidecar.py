@@ -219,7 +219,8 @@ _PCB_CSS = """
 # checkboxes toggle layers and a colored swatch shows each layer's color. Top/Bottom are
 # presets (a sensible layer set + mirror); individual layers refine it. The page polls
 # board mtime and refreshes only the visible overlays on save, preserving the toggles.
-PCB2D_PAGE = """<!doctype html><html><head><meta charset="utf-8"><style>""" + _PCB_CSS + """
+PCB2D_PAGE = """<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><style>""" + _PCB_CSS + """
  body{display:flex;flex-direction:column}
  #bar{flex-wrap:wrap}
  #stagewrap{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;
@@ -227,17 +228,18 @@ PCB2D_PAGE = """<!doctype html><html><head><meta charset="utf-8"><style>""" + _P
  #stage{position:relative;width:100%;height:100%}
  #stage.mir{transform:scaleX(-1)}
  #stage img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
- #bar button{padding:8px 14px}
- #backdrop{position:fixed;inset:0;background:#0007;display:none;z-index:9}
- #menu{position:fixed;z-index:10;display:none;background:#232427;border:1px solid #34363b;
-   border-radius:10px;padding:6px;min-width:220px;max-height:78vh;overflow:auto;
-   box-shadow:0 10px 30px #000a}
- #menu.open,#backdrop.open{display:block}
- #menu .row{display:flex;align-items:center;gap:11px;padding:11px 12px;border-radius:7px;
-   cursor:pointer;user-select:none;font-size:15px;color:#d4d7dd}
+ #bar button{padding:8px 14px;touch-action:manipulation}
+ .dd{position:relative;display:inline-block}
+ #menu{position:absolute;top:calc(100% + 6px);left:0;z-index:50;display:none;
+   background:#232427;border:1px solid #34363b;border-radius:10px;padding:6px;
+   min-width:230px;max-height:70vh;overflow:auto;box-shadow:0 10px 30px #000a}
+ #menu.open{display:block}
+ #menu .row{display:flex;align-items:center;gap:11px;width:100%;text-align:left;
+   padding:12px;margin:0;border:0;border-radius:7px;background:transparent;color:#d4d7dd;
+   font:inherit;font-size:15px;cursor:pointer;touch-action:manipulation}
  #menu .row.on{background:#1e2a38}
  #menu .row:active{background:#2d2f34}
- #menu .sw{width:17px;height:17px;border-radius:3px;border:1px solid #0006;flex:0 0 auto}
+ #menu .sw{width:18px;height:18px;border-radius:3px;border:1px solid #0006;flex:0 0 auto}
  #menu .nm{flex:1}
  #menu .ck{width:18px;text-align:center;color:#7fa8d8;opacity:0}
  #menu .row.on .ck{opacity:1}
@@ -245,10 +247,9 @@ PCB2D_PAGE = """<!doctype html><html><head><meta charset="utf-8"><style>""" + _P
 <div id="bar"><span class="lbl">PCB 2D</span>
   <button id="bt" class="active" onclick="preset('top')">Top</button>
   <button id="bb" onclick="preset('bottom')">Bottom</button>
-  <button id="lbtn" onclick="toggleMenu()">Layers ▾</button>
+  <span class="dd"><button id="lbtn" onclick="toggleMenu(event)">Layers ▾</button>
+    <div id="menu"></div></span>
 </div>
-<div id="backdrop" onclick="closeMenu()"></div>
-<div id="menu"></div>
 <div id="stagewrap"><div id="stage"></div></div>
 <script>
 // Colors are the KiCad "Paimon-Dark" theme's pcbnew `board` layer colors, so the 2D
@@ -280,7 +281,7 @@ function show(L,on){
 function buildMenu(){
   const menu=document.getElementById('menu');
   LAYERS.forEach(L=>{
-    const row=document.createElement('div'); row.className='row';
+    const row=document.createElement('button'); row.type='button'; row.className='row';
     row.innerHTML='<span class="sw" style="background:#'+L.color+'"></span>'+
       '<span class="nm">'+L.name+'</span><span class="ck">✓</span>';
     row.onclick=()=>show(L,!row.classList.contains('on'));
@@ -294,14 +295,11 @@ function preset(p){
   document.getElementById('bt').classList.toggle('active',p==='top');
   document.getElementById('bb').classList.toggle('active',p==='bottom');
 }
-function toggleMenu(){ document.getElementById('menu').classList.contains('open')?closeMenu():openMenu(); }
-function openMenu(){ const b=document.getElementById('lbtn').getBoundingClientRect(),
-  m=document.getElementById('menu');
-  m.style.left=Math.max(6,Math.min(b.left,innerWidth-240))+'px'; m.style.top=(b.bottom+5)+'px';
-  m.classList.add('open'); document.getElementById('backdrop').classList.add('open');
-}
-function closeMenu(){ document.getElementById('menu').classList.remove('open');
-  document.getElementById('backdrop').classList.remove('open'); }
+let menuOpen=false;
+function toggleMenu(e){ if(e) e.stopPropagation(); menuOpen?closeMenu():openMenu(); }
+function openMenu(){ document.getElementById('menu').classList.add('open'); menuOpen=true; }
+function closeMenu(){ document.getElementById('menu').classList.remove('open'); menuOpen=false; }
+document.addEventListener('click',e=>{ if(menuOpen && !e.target.closest('.dd')) closeMenu(); });
 async function tick(){
   if(document.hidden) return;
   try{ const m=(await (await fetch('/api/mtime')).json()).mtime;
