@@ -2,7 +2,7 @@
 from pathlib import Path
 
 from kicad_bench.core.config import AllowRule
-from kicad_bench.quality import erc_triage, netlist_audit
+from kicad_bench.quality import erc_triage, netlist_audit, symbol_style
 from kicad_bench.layout import netclass_coverage as ncc
 
 
@@ -90,6 +90,46 @@ def test_audit_live_presence_and_diff():
     warns = {f.where for f in res.findings if f.severity == "warn"}
     assert "TXD" in warns          # live-only (in editor, not saved file)
     assert "STALE_FILE_NET" in warns  # file-only (gone from live editor)
+
+
+# -- symbol-style (house symbol style guide) ------------------------------
+_SYM_LIB = '''(kicad_symbol_lib (version 20251024) (generator "x")
+  (symbol "GOOD"
+    (property "Reference" "U" (at 0 1.27 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "GOOD" (at 0 -1.27 0) (effects (font (size 1.016 1.016) (italic yes))))
+    (symbol "GOOD_1_1"
+      (pin power_in line (at 0 2.54 270) (length 2.54)
+        (name "VCC" (effects (font (size 1.27 1.27))))
+        (number "1" (effects (font (size 1.27 1.27)))))))
+  (symbol "BAD"
+    (property "Reference" "U" (at 0.9652 1.27 0) (effects (font (size 2.0 2.0))))
+    (property "Value" "BAD" (at 0 -1.27 0) (effects (font (size 1.016 1.016))))
+    (symbol "BAD_1_1"
+      (pin unspecified line (at 0 3.0 270) (length 2.54)
+        (name "X" (effects (font (size 1.27 1.27))))
+        (number "1" (effects (font (size 1.27 1.27))))))))
+'''
+
+
+def test_symbol_style_flags_deviations(tmp_path):
+    lib = tmp_path / "t.kicad_sym"
+    lib.write_text(_SYM_LIB)
+    res = symbol_style.audit([lib], strict=True)   # strict => deviations are errors
+    msgs = " | ".join(f.message for f in res.findings if f.severity == "error")
+    assert "off 50mil grid" in msgs                 # BAD Reference at 0.9652, pin at 3.0
+    assert "Reference is 2.0mm" in msgs             # wrong primary size
+    assert "Value must be italic" in msgs           # BAD value not italic
+    assert "unspecified" in msgs                    # pin type hygiene
+    # the GOOD symbol contributes no findings
+    assert not any(f.where == "GOOD" for f in res.findings if f.severity == "error")
+
+
+def test_symbol_style_advisory_passes(tmp_path):
+    lib = tmp_path / "t.kicad_sym"
+    lib.write_text(_SYM_LIB)
+    res = symbol_style.audit([lib], strict=False)   # advisory => warns, no errors
+    assert res.n_errors == 0
+    assert any(f.severity == "warn" for f in res.findings)
 
 
 # -- netclass resolution (KiCad net_settings semantics) ------------------
