@@ -231,29 +231,3 @@ server command and run `claude mcp add --scope user kicad-sch-api -- <command>`.
 you prefer Linux, use the repo's Linux setup notes instead of this script.
 
 ---
-
-## For the maintainer (helicopterrun) — read before sharing
-
-A few one-time things on **your** side so coworkers' HTTPS clones "just work":
-
-1. **Make these repos public on GitHub** (they're currently private/SSH). The script
-   clones over HTTPS with no auth, which only works if they're public:
-   - `helicopterrun/example-templates`
-   - `helicopterrun/example-block-library`
-   - `helicopterrun/design-block-generator`
-   - (`kicad-bench` is already public.)
-   - The example board repos (`example-project`, `example-board`) only matter if you
-     tell coworkers to use `-IncludeProjects`.
-
-   *Prefer to keep them private?* Re-run me and pick the GitHub-collaborator path instead —
-   I'll swap the script to `gh auth login` + auth'd clones.
-
-2. **Sanity-check the winget IDs / versions** the first time (`winget show KiCad.KiCad`).
-   The script pins KiCad to whatever winget serves as latest 10.x; `kb` targets KiCad 10.
-
-3. **Minor:** the two `kb` SKILL.md files mention a hard-coded `/root/...` config path in
-   their prerequisites. Harmless for coworkers (projects auto-discover their own
-   `kicad-bench.toml`), but worth genericizing when you next touch them.
-
-4. **Commit & share:** this kit lives in `kicad-bench/windows-onboarding/`. Once the repos
-   above are public, send coworkers the Quick-start "Option A" one-liner — that's all they need.
