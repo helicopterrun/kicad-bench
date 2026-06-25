@@ -17,13 +17,18 @@ Designing a board here is **four tools doing four jobs**:
 |---|---|---|
 | **KiCad 10** | Draw the schematic, lay out the PCB. The actual EDA app. | …constantly — it's where the design lives. |
 | **`kb` (kicad-bench)** | The **gate**. Read-only quality + DFM checks: ERC triage, netlist regressions, footprint resolution, net-class coverage, diff-pair length/skew, DRC, release readiness. | …before every commit and while routing. |
-| **Templates + design blocks** | Reusable starting points: pre-stacked board templates and ready-made subcircuits (LDO, buck, USB-C, …). | …when you start a new board or drop in a known circuit. |
-| **Claude Code** | The AI assistant, wired with our "skills" so it can drive `kb` and generate design blocks for you. | …whenever you want a second pair of hands. |
+| **Your title block + design blocks** | Your own drawing sheet/branding, plus reusable subcircuits — ones you already have *or* ones you generate. | …when you start a board or drop in a known circuit. |
+| **Claude Code** | The AI assistant, wired with our "skills" so it can drive `kb` and **generate design blocks** for you. | …whenever you want a second pair of hands. |
 
 **The golden rule of `kb`: it never edits your design.** Every quality check is
 read-and-report. The only files it ever writes are regenerable outputs under `output/`
 (and, if you ask, one git pre-commit hook). KiCad is the only thing that changes your
 `.kicad_sch` / `.kicad_pcb`. So you can run any `kb` command at any time without fear.
+
+> **Bring your own branding & blocks.** This kit deliberately ships *no* shared title
+> blocks or a shared design-block library — you use **your own**. The bootstrap prompts
+> you for a title block and scans for any design-block libraries you already have, and
+> the design-block generator lets you make new ones. Nothing proprietary is cloned.
 
 ---
 
@@ -57,8 +62,8 @@ powershell -ExecutionPolicy Bypass -File .\bootstrap.ps1
 Useful flags:
 
 ```powershell
-.\bootstrap.ps1 -IncludeProjects     # also clone the example boards
 .\bootstrap.ps1 -SkipClaudeCode      # KiCad + kb only, no AI tooling
+.\bootstrap.ps1 -NonInteractive      # don't prompt for a title block (unattended)
 .\bootstrap.ps1 -Workspace D:\kicad  # put the repos somewhere other than $HOME\kicad-stack
 ```
 
@@ -80,45 +85,53 @@ updates and re-sync everything.
 | `kb` (kicad-bench) | `pipx install --editable` | Isolated venv, on PATH, auto-tracks `git pull`. |
 | `kicad-sch-api` + `jsonschema` | `pip install --user` | Used by the design-block generator. |
 
+**Repos cloned (both public):** `kicad-bench` and `design-block-generator` into your
+workspace (`%USERPROFILE%\kicad-stack\` by default).
+
 **Locations:**
 
-- **Repos / your workspace:** `%USERPROFILE%\kicad-stack\` (or whatever `-Workspace` you passed) —
-  contains `kicad-bench`, `example-templates`, `example-block-library`, `design-block-generator`.
+- **Workspace:** `%USERPROFILE%\kicad-stack\` (or your `-Workspace`).
+- **Your templates:** `%USERPROFILE%\kicad-stack\my-templates\` — pointed to by the
+  `KICAD_USER_TEMPLATE_DIR` env var. Drop your own project templates / drawing sheet here.
 - **Claude skills:** linked into `%USERPROFILE%\.claude\skills\` — `kicad-quality-gate`,
   `kicad-layout-prep`, `design-block-generator`.
-- **Templates:** `KICAD_USER_TEMPLATE_DIR` (a user env var) points KiCad at the templates folder.
 - **MCP:** `kicad-sch-api` registered at user scope (`claude mcp list` to verify).
+
+---
+
+## Your title block & design blocks (bring your own)
+
+This kit doesn't impose anyone else's branding or parts library. During bootstrap:
+
+- **Title block** — you're asked for an optional `.kicad_wks` drawing sheet and a company /
+  owner name. Your sheet is copied into `my-templates\`; apply it per project via
+  **File → Page Settings → Drawing sheet file**, and set the company name there too.
+  (KiCad has no global title-block setting, so it's a quick per-project field — or bake it
+  into a template you save in `my-templates\`.)
+- **Design blocks** — the script scans `Documents\KiCad`, `Documents`, and your workspace
+  for any existing `*.kicad_blocks` libraries and lists what it finds. Register them in
+  **Preferences → Manage Design Block Libraries → Add**. Got none? Make your own — see below.
 
 ---
 
 ## Your first board
 
-1. **Open KiCad.** First time only, point it at the design-block library:
-   `Preferences → Manage Design Block Libraries → Add` → choose
-   `kicad-stack\example-block-library` → name it (e.g. `org-blocks`). One-time.
-2. **New project from a template:** `File → New Project from Template → User Templates`.
-   Pick the one that matches your fab/stackup:
-
-   | Template | Layers | Stackup |
-   |---|---|---|
-   | `2L_JLCPCB_Template` | 2 | 1.6 mm FR4 (JLCPCB) |
-   | `4L_JLCPCB_Template` | 4 | JLC04161H-7628 |
-   | `2L_OSHpark_Template` / `…After_Dark` | 2 | OSH Park |
-   | `4L_OSHpark_Template` | 4 | OSH Park 4-layer |
-
-3. **Design the schematic.** Drop in design blocks via `Place → Design Block` for common
-   subcircuits, or ask Claude Code to generate one (see below).
-4. **Gate it before you commit.** In a terminal, from the project folder:
+1. **New project from a template:** `File → New Project from Template`. Use one of KiCad's
+   built-in templates, or one you've saved into your `my-templates\` folder (it shows up
+   under **User Templates**). Set your title block in **File → Page Settings**.
+2. **Design the schematic.** Drop in design blocks via `Place → Design Block` (from any
+   library you registered), or **ask Claude Code to generate one** (see below).
+3. **Gate it before you commit.** In a terminal, from the project folder:
    ```powershell
    kb audit          # runs every read-only check at once; start here
    kb commit-gate    # footprints + ERC triage + netlist regression -> one verdict
    ```
-5. **Lay out the PCB.** Keep the live dashboard open beside KiCad — it re-runs the audit
+4. **Lay out the PCB.** Keep the live dashboard open beside KiCad — it re-runs the audit
    automatically every time you save the board:
    ```powershell
    kb sidecar        # -> http://127.0.0.1:8765
    ```
-6. **Ship it.** When ERC/DRC are clean and the BOM has no unsourced rows:
+5. **Ship it.** When ERC/DRC are clean and the BOM has no unsourced rows:
    ```powershell
    kb release-prep            # checks readiness
    kb release-prep --export   # writes gerbers + drill + position files to output\release\
@@ -126,7 +139,7 @@ updates and re-sync everything.
 
 > Each project carries its own `kicad-bench.toml` at its root, so `kb` finds its config
 > automatically — you rarely need `--config`. Just run `kb` commands from inside the
-> project folder.
+> project folder. (Run `kb init` to create one for a new project.)
 
 ---
 
@@ -182,7 +195,8 @@ The bootstrap wires three **skills** so Claude works the way it does on our othe
   diff-pairs, release prep).
 - **`design-block-generator`** — turns a screenshot, a description, or an existing
   schematic into a reusable KiCad design block, with approved-parts + ERC gates on both
-  ends. Try: *"Make a design block for an AMS1117 3.3 V LDO."*
+  ends. **This is how you build your own block library.** Try:
+  *"Make a design block for an AMS1117 3.3 V LDO."*
 
 Verify the AI plumbing any time with `claude mcp list` (you should see `kicad-sch-api`).
 
@@ -214,9 +228,6 @@ that `bin` folder to your PATH, or just re-run the bootstrap.
 **`running scripts is disabled on this system`** → Launch with the bypass flag (as shown):
 `powershell -ExecutionPolicy Bypass -File .\bootstrap.ps1`. That bypass is per-invocation
 and doesn't change your machine's policy.
-
-**A repo clone failed** → That repo is probably still **private**. Ask the maintainer to
-make it public (or to add you as a collaborator — then run `gh auth login` and re-run).
 
 **`python` opens the Microsoft Store** → That's the Store alias stub. The script prefers the
 `py` launcher and works around it; if it persists, disable the alias in

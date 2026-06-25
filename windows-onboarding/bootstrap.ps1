@@ -13,8 +13,11 @@
       * Node LTS        - runtime for Claude Code         (skipped with -SkipClaudeCode)
       * Claude Code     - the AI workflow + the kb skills + kicad-sch-api MCP
       * kicad-bench     - the `kb` quality/DFM gate CLI (16 commands), installed via pipx
-      * Our repos       - kicad-bench, example-templates, example-block-library,
-                          design-block-generator, cloned into a workspace folder
+      * design-block-generator - the skill+tooling to make your OWN reusable blocks
+
+    Bring-your-own personalization (no shared branding): you're prompted for your own
+    title block / drawing sheet, and the script scans for any design-block libraries you
+    already have. Nothing private is cloned.
 
     Idempotent: anything already present is detected and skipped, so you can re-run it
     any time to pull repo updates and re-sync the Claude skills.
@@ -25,42 +28,32 @@
 .PARAMETER Workspace
     Where to clone the repos. Default: $HOME\kicad-stack
 
-.PARAMETER IncludeProjects
-    Also clone the example board projects (off by default).
-
 .PARAMETER SkipClaudeCode
     Install only the KiCad + kb PCB essentials (no Node / Claude Code / skills / MCP).
 
-.EXAMPLE
-    powershell -ExecutionPolicy Bypass -File .\bootstrap.ps1
+.PARAMETER NonInteractive
+    Don't prompt for a title block / company name (for unattended runs).
 
 .EXAMPLE
-    powershell -ExecutionPolicy Bypass -File .\bootstrap.ps1 -IncludeProjects
+    powershell -ExecutionPolicy Bypass -File .\bootstrap.ps1
 #>
 [CmdletBinding()]
 param(
     [string]$Workspace = (Join-Path $HOME 'kicad-stack'),
-    [switch]$IncludeProjects,
-    [switch]$SkipClaudeCode
+    [switch]$SkipClaudeCode,
+    [switch]$NonInteractive
 )
 
 $ErrorActionPreference = 'Stop'
 
 # ---------------------------------------------------------------------------
-# Repos to clone (HTTPS / public). See windows-onboarding/README.md -> "For the
-# maintainer": the *-templates / *-design-blocks / design-block-generator repos
-# must be public on GitHub for these HTTPS clones to work without auth.
+# Public tooling repos cloned over HTTPS. (Personal templates & the shared
+# design-block library are intentionally NOT here - they stay private. Each
+# coworker brings their own title block and design blocks; see steps 7-8.)
 # ---------------------------------------------------------------------------
 $ToolRepos = @(
     @{ name = 'kicad-bench';            url = 'https://github.com/helicopterrun/kicad-bench.git' },
-    @{ name = 'example-templates';        url = 'https://github.com/helicopterrun/example-templates.git' },
-    @{ name = 'example-block-library';    url = 'https://github.com/helicopterrun/example-block-library.git' },
     @{ name = 'design-block-generator'; url = 'https://github.com/helicopterrun/design-block-generator.git' }
-)
-# Example board projects - only cloned with -IncludeProjects.
-$ProjectRepos = @(
-    @{ name = 'example-project'; url = 'https://github.com/helicopterrun/example-project.git' },
-    @{ name = 'example-board';     url = 'https://github.com/helicopterrun/example-board.git' }
 )
 
 # --- pretty output (ASCII only, safe on any Windows console) ---------------
@@ -157,7 +150,7 @@ function Link-OrCopy($link, $target) {
 # ===========================================================================
 Write-Host ""
 Write-Host "  KiCad PCB stack - Windows bootstrap" -ForegroundColor White
-Write-Host "  workspace : $Workspace"
+Write-Host "  workspace   : $Workspace"
 Write-Host "  Claude Code : $(if ($SkipClaudeCode) { 'SKIPPED (-SkipClaudeCode)' } else { 'included' })"
 Write-Host ""
 
@@ -165,9 +158,9 @@ Ensure-Winget
 
 # --- 1. system tools via winget -------------------------------------------
 Step "1/8  System tools (winget)"
-Install-Pkg 'Git.Git'           { Have 'git' }
+Install-Pkg 'Git.Git'            { Have 'git' }
 Install-Pkg 'Python.Python.3.12' { Resolve-Python; [bool]$script:PyExe }
-Install-Pkg 'KiCad.KiCad'       { [bool](Find-KicadCli) }
+Install-Pkg 'KiCad.KiCad'        { [bool](Find-KicadCli) }
 if (-not $SkipClaudeCode) {
     Install-Pkg 'OpenJS.NodeJS.LTS' { Have 'node' }
 }
@@ -184,8 +177,8 @@ $cli = Find-KicadCli
 if ($cli) { Add-UserPath (Split-Path $cli); Ok "kicad-cli: $cli" }
 else      { Warn "kicad-cli.exe not found - check that KiCad installed correctly, then re-run." }
 
-# --- 3. clone / update the repos ------------------------------------------
-Step "3/8  Clone repos -> $Workspace"
+# --- 3. clone / update the public tooling repos ---------------------------
+Step "3/8  Clone tooling repos -> $Workspace"
 New-Item -ItemType Directory -Force -Path $Workspace | Out-Null
 function Sync-Repo($name, $url) {
     $dest = Join-Path $Workspace $name
@@ -196,13 +189,11 @@ function Sync-Repo($name, $url) {
         Info "cloning $name ..."
         git clone $url $dest 2>&1 | Out-Host
         if ($LASTEXITCODE -ne 0) {
-            Warn "clone of $name failed. If this repo is still PRIVATE, make it public on GitHub"
-            Warn "(or add yourself as a collaborator and run 'gh auth login') and re-run."
+            Warn "clone of $name failed - if this repo isn't public yet, ask the maintainer to publish it, then re-run."
         }
     }
 }
 foreach ($r in $ToolRepos) { Sync-Repo $r.name $r.url }
-if ($IncludeProjects) { foreach ($r in $ProjectRepos) { Sync-Repo $r.name $r.url } }
 
 # --- 4. kicad-bench (kb) via pipx -----------------------------------------
 Step "4/8  Install kicad-bench (the 'kb' CLI) via pipx"
@@ -280,17 +271,70 @@ if (-not $SkipClaudeCode) {
     foreach ($s in $skillMap) { Link-OrCopy (Join-Path $skillsDir $s.link) $s.target }
 }
 
-# --- 8. point KiCad at the templates --------------------------------------
-Step "8/8  Point KiCad at the project templates"
-$tpl = Join-Path $Workspace 'example-templates'
-if (Test-Path $tpl) {
-    [Environment]::SetEnvironmentVariable('KICAD_USER_TEMPLATE_DIR', $tpl, 'User')
-    $env:KICAD_USER_TEMPLATE_DIR = $tpl
-    Ok "KICAD_USER_TEMPLATE_DIR = $tpl"
-    Info "In KiCad: File > New Project from Template > User Templates."
+# --- 8. your title block + your design blocks (bring your own) ------------
+Step "8/8  Your title block + design blocks"
+
+# Personal template dir (yours to fill) - KiCad shows it under User Templates.
+$myTpl = Join-Path $Workspace 'my-templates'
+New-Item -ItemType Directory -Force -Path $myTpl | Out-Null
+[Environment]::SetEnvironmentVariable('KICAD_USER_TEMPLATE_DIR', $myTpl, 'User')
+$env:KICAD_USER_TEMPLATE_DIR = $myTpl
+Ok "KICAD_USER_TEMPLATE_DIR = $myTpl"
+Info "Drop any .kicad project templates in there - they appear under File > New Project from Template > User Templates."
+
+if (-not $NonInteractive) {
+    Write-Host ""
+    $wks = Read-Host "  Path to YOUR drawing sheet (.kicad_wks) to use, or press Enter to skip"
+    if ($wks -and (Test-Path $wks)) {
+        Copy-Item $wks (Join-Path $myTpl 'drawing-sheet.kicad_wks') -Force
+        Ok "copied your drawing sheet -> $myTpl\drawing-sheet.kicad_wks"
+        Info "Apply it per project: File > Page Settings > Drawing sheet file."
+    } elseif ($wks) {
+        Warn "not found: $wks (skipping)"
+    }
+
+    $company = Read-Host "  Company / owner name for your title block, or press Enter to skip"
+    if ($company) {
+        Set-Content (Join-Path $myTpl 'TITLEBLOCK.txt') @"
+Title-block company/owner: $company
+Set it per project in KiCad: File > Page Settings > Company = $company
+(KiCad has no global title-block setting; enter it once per project, or bake it
+ into a template you save in this folder.)
+"@
+        Ok "noted '$company' in $myTpl\TITLEBLOCK.txt"
+        Info "Set it per project: File > Page Settings > Company = $company"
+    }
 } else {
-    Warn "example-templates not cloned - skipping template wiring."
+    Info "(-NonInteractive) skipped title-block prompts. Set yours later via File > Page Settings."
 }
+
+# Look for design-block libraries you already have.
+Write-Host ""
+Info "Looking for design-block libraries you already have ..."
+$searchRoots = @(
+    (Join-Path $HOME 'Documents\KiCad'),
+    (Join-Path $HOME 'Documents'),
+    $Workspace
+) | Where-Object { Test-Path $_ } | Select-Object -Unique
+$foundBlocks = @()
+foreach ($root in $searchRoots) {
+    $foundBlocks += Get-ChildItem $root -Recurse -Directory -Filter '*.kicad_blocks' -ErrorAction SilentlyContinue |
+                    Select-Object -ExpandProperty FullName
+}
+$foundBlocks = $foundBlocks | Sort-Object -Unique
+if ($foundBlocks) {
+    Ok "Found design-block libraries:"
+    $foundBlocks | ForEach-Object { Write-Host "       $_" }
+    Info "Register them in KiCad: Preferences > Manage Design Block Libraries > Add."
+} else {
+    Info "No existing .kicad_blocks libraries found - that's fine."
+    if (-not $SkipClaudeCode) {
+        Info "Make your own with the design-block-generator skill in Claude Code, e.g.:"
+        Info '   "Make a design block for an AMS1117 3.3V LDO"'
+    }
+}
+$dbTable = Join-Path $env:APPDATA 'kicad\10.0\design-block-lib-table'
+if (Test-Path $dbTable) { Ok "KiCad already has a design-block-lib-table ($dbTable)." }
 
 # --- verify ----------------------------------------------------------------
 Step "Verifying"
@@ -320,8 +364,8 @@ Write-Host ""
 Write-Host " First steps:"
 Write-Host "   1. Open a new PowerShell window."
 Write-Host "   2. Confirm the gate works:        kb doctor"
-Write-Host "   3. Launch KiCad and make a board from a template"
-Write-Host "      (File > New Project from Template > User Templates)."
+Write-Host "   3. In KiCad, make a board: File > New Project from Template"
+Write-Host "      (KiCad's built-in templates, or your own in $myTpl)."
 Write-Host "   4. In the project folder, run the live dashboard:   kb sidecar"
 Write-Host "      and the full audit:                              kb audit"
 if (-not $SkipClaudeCode) {
