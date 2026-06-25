@@ -5,8 +5,8 @@ can be read straight out of a `.kicad_sym` file:
 
   * 50 mil (1.27 mm) grid: every field and pin position snaps to the grid ("no off-grid
     endpoints, ever").
-  * Typography: Reference and pin name/number at 50 mil; Value italic; visible secondary
-    fields (Description / Datasheet) at 40 mil italic.
+  * Typography: Reference and pin name/number at 50 mil regular; Value at 40 mil italic;
+    visible secondary fields (Description / Datasheet) at 40 mil italic.
   * ERC hygiene: flag pins left at electrical type `unspecified`.
 
 Grouping, overlap, orientation, and pad↔pin matching are human review (the guide says so)
@@ -146,9 +146,12 @@ def audit_symbol(symbol, res: Result, sev):
             sev(f"{name}: field '{pname}' off 50mil grid at ({at[0]}, {at[1]})mm", name)
         sz, italic = _font(_first(prop, "effects"))
         if pname == "Reference" and sz is not None and abs(sz - PRIMARY_MM) > EPS:
-            sev(f"{name}: Reference is {sz}mm, expected 50mil (1.27mm)", name)
-        if pname == "Value" and not italic:
-            sev(f"{name}: Value must be italic", name)
+            sev(f"{name}: Reference is {sz}mm, expected 50mil (1.27mm) regular", name)
+        if pname == "Value":
+            if sz is not None and abs(sz - SECONDARY_MM) > EPS:
+                sev(f"{name}: Value is {sz}mm, expected 40mil (1.016mm)", name)
+            if not italic:
+                sev(f"{name}: Value must be italic", name)
         if pname in _SECONDARY_FIELDS and not _hidden(prop):
             if sz is not None and abs(sz - SECONDARY_MM) > EPS:
                 sev(f"{name}: visible {pname} is {sz}mm, expected 40mil (1.016mm)", name)

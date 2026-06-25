@@ -35,25 +35,25 @@ this file; the rendered visual version lives in the claude.ai/design project
 | Field | Lives | Notes |
 |---|---|---|
 | Reference designator | above body (or per placement rule) | `J1 R1 C1`, auto-incremented |
-| Value | paired with reference | part value / library name; **italic** |
+| Value | paired with reference | part value / library name; **40 mil italic** |
 | Pin name | **inside** the body, justified toward its pin | the signal function |
 | Pin number | **above** the pin line, outside the body | the physical pad ID — must match the footprint |
 | Electrical type | (editor only, hidden on sheet) | drives ERC — set it correctly |
 | Description & datasheet | rotated, tucked **inside** the body | never reach the pins |
 
-## 3. Typography — two roles, two sizes
+## 3. Typography — two sizes
 
-| Role | Fields | Size | Justify | Style |
-|---|---|---|---|---|
-| Primary | reference, pin name, pin number | **50 mil (1.27 mm)** | center/center | default font, regular |
-| Secondary | description, notes, datasheet | **40 mil (1.016 mm)** | center/center | default font, *italic* |
+| Field(s) | Size | Justify | Style |
+|---|---|---|---|
+| **Reference**, pin name, pin number | **50 mil (1.27 mm)** | center/center | regular |
+| **Value** | **40 mil (1.016 mm)** | center/center | *italic* |
+| Description, notes, datasheet | **40 mil (1.016 mm)** | center/center | *italic* |
 
 Default font = the built-in KiCad Font. No second typeface, no off-scale sizes.
 
-> **House resolution of a draft ambiguity:** the guide lists Value under "primary"
-> (50 mil regular) but also calls Value "always italic." Our existing
-> `0_Project_Defaults` library draws Value at **40 mil italic**, so that is the house
-> default the checker accepts. What is *not* negotiable: Value is **italic**.
+**House rule (settled):** Reference is **50 mil regular**; Value is **40 mil italic**.
+This resolves the source guide's draft ambiguity (which listed Value as both
+"primary 50 mil regular" and "always italic") — Value follows the secondary size, italic.
 
 ## 4. Field placement
 
@@ -85,9 +85,12 @@ bottom-to-top — never upside down). Pick one field arrangement per library and
 
 ## 7. Footprints
 
-Pending — the imported guide has not yet codified the footprint half (courtyard, silk,
-fab/assembly layers, pad↔pin numbering, pin-1 marker, 3D alignment, naming). Add real
-examples to the claude.ai/design project, then extend this section + the checker.
+Pending — and **footprints are hand-built by the human** (like schematic layout, the
+craft here isn't auto-generated; see [[no-schematic-layout-codegen]]). The guide has not
+yet codified the footprint conventions (courtyard, silk, fab/assembly layers, pad↔pin
+numbering, pin-1 marker, 3D alignment, naming). Once you hand-build a couple of "good"
+examples and add them to the claude.ai/design project, we extend this section + the
+checker to *review* footprints against them — not to produce them.
 
 ## 8. Reviewer checklist (before a symbol enters the library)
 
@@ -97,7 +100,7 @@ examples to the claude.ai/design project, then extend this section + the checker
 | Pins grouped by function, gap between groups | human review |
 | Every pin number matches a footprint pad | human review (footprint half pending) |
 | No text crosses a pin, body, or field | human review |
-| Primary 50 mil regular, secondary 40 mil italic, value italic | `kb symbol-style` |
+| Reference 50 mil regular; Value & secondary 40 mil italic | `kb symbol-style` |
 | Passive horizontal, flows left → right | human review (schematic placement) |
 | Electrical types set for ERC | `kb symbol-style` (flags `unspecified`) |
 | Datasheet & description filled, tucked inside | human review |

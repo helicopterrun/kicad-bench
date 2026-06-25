@@ -103,7 +103,7 @@ _SYM_LIB = '''(kicad_symbol_lib (version 20251024) (generator "x")
         (number "1" (effects (font (size 1.27 1.27)))))))
   (symbol "BAD"
     (property "Reference" "U" (at 0.9652 1.27 0) (effects (font (size 2.0 2.0))))
-    (property "Value" "BAD" (at 0 -1.27 0) (effects (font (size 1.016 1.016))))
+    (property "Value" "BAD" (at 0 -1.27 0) (effects (font (size 1.27 1.27))))
     (symbol "BAD_1_1"
       (pin unspecified line (at 0 3.0 270) (length 2.54)
         (name "X" (effects (font (size 1.27 1.27))))
@@ -118,6 +118,7 @@ def test_symbol_style_flags_deviations(tmp_path):
     msgs = " | ".join(f.message for f in res.findings if f.severity == "error")
     assert "off 50mil grid" in msgs                 # BAD Reference at 0.9652, pin at 3.0
     assert "Reference is 2.0mm" in msgs             # wrong primary size
+    assert "Value is 1.27mm" in msgs                # BAD value wrong size (want 40mil)
     assert "Value must be italic" in msgs           # BAD value not italic
     assert "unspecified" in msgs                    # pin type hygiene
     # the GOOD symbol contributes no findings
