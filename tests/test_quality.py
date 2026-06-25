@@ -2,7 +2,7 @@
 from pathlib import Path
 
 from kicad_bench.core.config import AllowRule
-from kicad_bench.quality import erc_triage, netlist_audit, symbol_style
+from kicad_bench.quality import erc_triage, netlist_audit, symbol_style, sch_readability
 from kicad_bench.layout import netclass_coverage as ncc
 
 
@@ -131,6 +131,46 @@ def test_symbol_style_advisory_passes(tmp_path):
     res = symbol_style.audit([lib], strict=False)   # advisory => warns, no errors
     assert res.n_errors == 0
     assert any(f.severity == "warn" for f in res.findings)
+
+
+# -- sch-readability (objective sheet-layout rule gate) -------------------
+def _sheet(symbols: str) -> str:
+    # R body = 2x5mm rectangle; symbols arg places instances.
+    return ('(kicad_sch (paper "B")\n'
+            '  (lib_symbols (symbol "L:R" (symbol "R_0_1"\n'
+            '    (rectangle (start -1.0 -2.5) (end 1.0 2.5)))))\n'
+            f'{symbols}\n)')
+
+
+def _inst(ref, x, y, rot=0):
+    return (f'  (symbol (lib_id "L:R") (at {x} {y} {rot})\n'
+            f'    (property "Reference" "{ref}" (at {x} {y} 0)))')
+
+
+def test_sch_readability_clean_passes(tmp_path):
+    f = tmp_path / "ok.kicad_sch"
+    f.write_text(_sheet("\n".join([_inst("R1", 50.8, 50.8), _inst("R2", 60.96, 50.8)])))
+    res = sch_readability.audit(f)
+    assert res.n_errors == 0 and res.passed
+
+
+def test_sch_readability_flags_overlap_and_offgrid(tmp_path):
+    f = tmp_path / "bad.kicad_sch"
+    # R1/R2 at the same spot (bodies overlap); R3 off the 1.27mm grid.
+    f.write_text(_sheet("\n".join([
+        _inst("R1", 50.8, 50.8), _inst("R2", 50.8, 50.8), _inst("R3", 50.9, 50.8)])))
+    res = sch_readability.audit(f)
+    msgs = " | ".join(f.message for f in res.findings if f.severity == "error")
+    assert "bodies overlap" in msgs
+    assert "off 50mil grid" in msgs
+    assert not res.passed
+
+
+def test_sch_readability_flags_offpage(tmp_path):
+    f = tmp_path / "oob.kicad_sch"
+    f.write_text(_sheet(_inst("R1", 1.27, 50.8)))   # x=1.27 < 12.7 margin → body off page
+    res = sch_readability.audit(f)
+    assert any("outside usable page" in x.message for x in res.findings)
 
 
 # -- netclass resolution (KiCad net_settings semantics) ------------------
