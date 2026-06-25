@@ -15,9 +15,9 @@ Thin wrapper over the `kb` CLI (the kicad-bench package). All commands are
 read-only and exit non-zero on a real problem, so they compose and gate commits.
 
 ## Prerequisites
-- `kb` on PATH (`pip install -e /root/kicad-bench`) and `kicad-cli` (KiCad 10).
+- `kb` on PATH (`pip install -e .`) and `kicad-cli` (KiCad 10).
 - A `kicad-bench.toml` for the project. For Example Board use
-  `--config /root/kicad-bench/configs/example-board.toml`. Run `kb doctor` to check.
+  `--config configs/example-board.toml`. Run `kb doctor` to check.
 
 ## When to use which command
 

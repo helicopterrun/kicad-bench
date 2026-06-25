@@ -25,8 +25,8 @@ board.
 ## Install
 
 ```sh
-pip install -e /root/kicad-bench --break-system-packages   # exposes the `kb` CLI
-kb doctor --config /root/kicad-bench/configs/example-board.toml
+pip install -e . --break-system-packages   # exposes the `kb` CLI
+kb doctor --config configs/example-board.toml
 ```
 
 Requires KiCad 10 `kicad-cli` on PATH. Core is stdlib-only; `release-prep`'s BOM
@@ -67,7 +67,7 @@ trust in the gate.
   false-positive matching a `[[erc.allow]]` rule in the config.
 - `ERROR` — everything else.
 
-Only `ERROR` lines fail the command. The partial-build logic mirrors the LVDS
+Only `ERROR` lines fail the command. The partial-build logic mirrors the original
 project's `validate_sheet.py` exactly, so behaviour is identical; the `[[erc.allow]]`
 layer is the new config-driven part.
 
@@ -139,7 +139,7 @@ $ kb block-review "Example Board/video.kicad_sch" --config CFG
       block 'video' reserves: C60, C61, C62, C63, ...
   -> FAIL  1 issue(s) in video
 ```
-(That is a *real* finding on LVDS: the video sheet uses `ESD3`, but the conventions
+(That is a *real* finding on this board: the video sheet uses `ESD3`, but the conventions
 reserve only `ESD1` for video — exactly the drift this tool exists to catch.)
 
 ### `kb commit-gate`
@@ -400,7 +400,7 @@ Sanity check: confirms `kicad-cli` is on PATH and reports which config will be u
 
 One file holds all project specifics, so the tools stay generic. A config kept in
 *this* repo can point at a separate design repo via `project.root` (that's how
-`configs/example-board.toml` keeps the LVDS design repo untouched).
+`configs/example-board.toml` keeps the example design repo untouched).
 
 ```toml
 [project]
@@ -432,7 +432,7 @@ stackup = "JLC04161H-7628"
 **Where contract data comes from.** `contracts.nets` can be an inline list or
 `from:<file>` — a design-rules JSON (whose `nets`/`diff_pairs` enumerate every named
 net) or a markdown doc scanned for `UPPER_SNAKE` net tokens. This is deliberate: the
-LVDS config sources its net list straight from the existing
+example config sources its net list straight from the existing
 `design_rules_config.json` so it never duplicates (and drifts from) the
 source-of-truth.
 

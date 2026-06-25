@@ -16,7 +16,7 @@ the only writes are into `output/` (regenerable) and never into the `.kicad_pcb`
 
 ## Prerequisites
 Same as kicad-quality-gate: `kb` + `kicad-cli` + a `kicad-bench.toml`. For LVDS use
-`--config /root/kicad-bench/configs/example-board.toml`.
+`--config configs/example-board.toml`.
 
 ## When to use which command
 
