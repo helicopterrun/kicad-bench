@@ -48,6 +48,54 @@ def audit(sch: Path, expect: dict[str, int] | None) -> Result:
     return res
 
 
+def _named_live(live_nets) -> set[str]:
+    """User-meaningful (labelled) live net names, leading '/' stripped. Excludes KiCad
+    'Net-(…)' autonames and 'unconnected-(…)' pseudo-nets (they churn and aren't the
+    bug class this audit targets)."""
+    return {n["name"].lstrip("/") for n in live_nets if n.get("kind") == "named"}
+
+
+def audit_live(live_nets: list[dict], expect: dict[str, int] | None,
+               file_counts: dict[str, list[str]] | None) -> Result:
+    """Ground-truth net audit against the RUNNING editor (reflects unsaved edits).
+
+    The IPC API exposes net *names* as ground truth but not per-pin node membership
+    (symbol pins aren't resolvable items), so live mode asserts net **presence**, not
+    node counts — node-count assertions stay in the default (file) path. Two checks:
+      1. every expected net is present in the live netlist (catches a net merged into
+         GND / renamed / deleted — live, before you save);
+      2. live-vs-saved-file divergence among named nets (what an unsaved edit changed,
+         or a stale saved baseline).
+    """
+    res = Result("Netlist audit — LIVE (IPC, named nets)")
+    real = _named_live(live_nets)
+    expect = expect or {}
+
+    for net in sorted(expect):
+        if net in real:
+            res.ok(f"{net}: present", net)
+        else:
+            res.error(f"{net}: MISSING from live netlist (expected {expect[net]} nodes)", net)
+
+    if file_counts is not None:
+        file_named = {n for n in file_counts if n and not n.startswith("Net-")}
+        for net in sorted(real - file_named):
+            res.warn(f"{net}: in LIVE editor but not in saved file (unsaved edit?)", net)
+        for net in sorted(file_named - real):
+            res.warn(f"{net}: in saved file but GONE from live editor (merged/renamed?)", net)
+
+    n_auto = sum(1 for n in live_nets if n.get("kind") == "auto")
+    n_unc = sum(1 for n in live_nets if n.get("kind") == "unconnected")
+    if not expect:
+        for net in sorted(real):
+            res.info(f"{net}: present (live)", net)
+    res.summary = (f"{len(real)} named nets live (+{n_auto} auto, +{n_unc} unconnected); "
+                   + (f"{res.n_errors} expected missing of {len(expect)} checked. "
+                      if expect else "presence-only — ")
+                   + "per-pin counts need file mode (API can't resolve pins).")
+    return res
+
+
 def emit_baseline(sch: Path, dest: Path) -> int:
     """Write {net: node_count} from the current netlist as a regression baseline."""
     counts, _ = cli.netlist_nets(sch)
@@ -63,6 +111,25 @@ def emit_baseline(sch: Path, dest: Path) -> int:
 def run(args) -> int:
     cfg = cfgmod.load_or_exit(args.config)
     sch = Path(args.schematic) if args.schematic else cfg.root_sch
+
+    if args.live:
+        # Ground-truth audit against the running editor. The schematic file is optional
+        # here (only used for the live-vs-saved diff); presence checks need no file.
+        from ..sch_live import fetch_live
+        data = fetch_live(args, ["sch", "--nets"])
+        live_nets = data.get("nets", [])
+        file_counts = None
+        if sch and Path(sch).exists():
+            try:
+                file_counts, _ = cli.netlist_nets(Path(sch))
+            except cli.KicadCliError:
+                file_counts = None  # diff is best-effort; presence audit still runs
+        expect = cfg.expected_nets
+        if args.expect:
+            expect = json.loads(Path(args.expect).read_text())
+        res = audit_live(live_nets, expect, file_counts)
+        return render_and_exit(res)
+
     if not sch:
         sys.exit("error: no schematic given and no project.root_sch in config")
     if not Path(sch).exists():
@@ -92,5 +159,10 @@ def add_parser(sub):
     p.add_argument("--emit-baseline", metavar="PATH",
                    help="write current node counts as a baseline JSON, then exit "
                         "(a dir/trailing-slash auto-names <config>.expected_nets.json)")
+    p.add_argument("--live", action="store_true",
+                   help="audit the RUNNING editor over IPC (reflects unsaved edits): "
+                        "expected-net presence + live-vs-saved diff (needs kb-ipc + KiCad 11)")
+    p.add_argument("--socket", help="--live: override API socket (else KICAD_API_SOCKET / config)")
+    p.add_argument("--timeout", type=int, default=20, help="--live: kb-ipc timeout seconds")
     p.add_argument("--config", help=f"path to {cfgmod.CONFIG_NAME}")
     p.set_defaults(func=run)

@@ -73,6 +73,25 @@ def test_netlist_audit(monkeypatch):
     assert "MISSING from netlist" in missing.message
 
 
+def test_audit_live_presence_and_diff():
+    # live netlist (as kb-ipc sch --nets emits): named vs auto vs unconnected.
+    live = [
+        {"name": "/VBUS", "kind": "named", "members": 10},
+        {"name": "GND", "kind": "named", "members": 12},
+        {"name": "/TXD", "kind": "named", "members": 2},
+        {"name": "Net-(D1-A)", "kind": "auto", "members": 2},
+        {"name": "unconnected-(U1-NC-Pad10)", "kind": "unconnected", "members": 1},
+    ]
+    # expected net RXD is absent from live -> one error; auto/unconnected ignored.
+    file_counts = {"VBUS": ["x.1"], "GND": ["y.1"], "STALE_FILE_NET": ["z.1"]}  # TXD only live
+    res = netlist_audit.audit_live(live, {"VBUS": 10, "RXD": 2}, file_counts)
+    assert res.n_errors == 1                                   # RXD missing live
+    assert next(f for f in res.findings if f.where == "RXD").severity == "error"
+    warns = {f.where for f in res.findings if f.severity == "warn"}
+    assert "TXD" in warns          # live-only (in editor, not saved file)
+    assert "STALE_FILE_NET" in warns  # file-only (gone from live editor)
+
+
 # -- netclass resolution (KiCad net_settings semantics) ------------------
 # KiCad 10: a net is assigned to EVERY matching pattern's class (not last-wins),
 # patterns match as glob OR regex, and netclass_assignments map net -> [classes].
