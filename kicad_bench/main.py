@@ -7,6 +7,7 @@ Each tool module exposes `add_parser(subparsers)` registering its subcommand and
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from . import __version__, audit, datasheet, sch_live, sidecar, stage
@@ -71,7 +72,15 @@ def main(argv=None) -> int:
     if not getattr(args, "func", None):
         parser.print_help()
         return 0
-    return args.func(args)
+    try:
+        return args.func(args)
+    except BrokenPipeError:
+        # A downstream consumer (e.g. `kb datasheet search … | head`) closed the pipe.
+        # Exit quietly like coreutils: redirect stdout to devnull so the interpreter's
+        # flush-on-exit doesn't re-raise BrokenPipeError as an ugly traceback.
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        return 0
 
 
 if __name__ == "__main__":
