@@ -15,6 +15,11 @@ _FOOTPRINT = re.compile(r'\(property\s+"Footprint"\s+"([^"]*)"')
 _REFERENCE = re.compile(r'\(property\s+"Reference"\s+"([^"]*)"')
 _VALUE = re.compile(r'\(property\s+"Value"\s+"([^"]*)"')
 _LIB_ENTRY = re.compile(r'\(lib\s+\(name\s+"([^"]+)"\).*?\(uri\s+"([^"]+)"\)', re.S)
+# A symbol's Value followed (within the same instance block) by its Datasheet property.
+# Value precedes Datasheet in each KiCad symbol block, and the non-greedy gap stops at
+# the FIRST Datasheet after the Value, so the two pair up per symbol.
+_VALUE_DATASHEET = re.compile(
+    r'\(property\s+"Value"\s+"([^"]*)".*?\(property\s+"Datasheet"\s+"([^"]*)"', re.S)
 
 
 def input_hier_nets(sch: str | Path) -> set[str]:
@@ -42,6 +47,28 @@ def footprint_refs(sheets: list[Path]) -> dict[str, set[str]]:
             if fp.strip():
                 refs.setdefault(fp, set()).add(sheet.name)
     return refs
+
+
+def datasheet_fields(sheets: list[Path]) -> dict[str, str]:
+    """Map each symbol's Value -> its Datasheet URL across the given sheets.
+
+    Best-effort, in the same regex style as `footprint_refs`. Only keeps entries whose
+    Datasheet field is an actual URL (contains "://"), which drops the `~`/empty
+    placeholders on lib_symbols templates and on parts with no datasheet set. First
+    URL seen for a Value wins.
+    """
+    out: dict[str, str] = {}
+    for sheet in sheets:
+        try:
+            text = sheet.read_text()
+        except (OSError, UnicodeDecodeError):
+            continue
+        for val, ds in _VALUE_DATASHEET.findall(text):
+            ds = ds.strip()
+            val = val.strip()
+            if val and "://" in ds:
+                out.setdefault(val, ds)
+    return out
 
 
 _DESIGNATOR = re.compile(r"^[A-Za-z]+\d+$")

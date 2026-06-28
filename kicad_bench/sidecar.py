@@ -721,8 +721,6 @@ class _State:
         return dsmod._datasheet_pdfs(self.cfg.root)
 
     def datasheet_meta(self, idx: int):
-        if not shutil.which("pdftotext"):
-            return None
         pdfs = self.datasheet_list()
         if not (0 <= idx < len(pdfs)):
             return None
@@ -730,7 +728,17 @@ class _State:
         key = str(pdf)
         with self.lock:
             m = self._ds_meta.get(key)
-        if m is None:
+        if m is not None:
+            return (pdf, m)
+        # Prefer the committed index (no poppler needed); fall back to a live parse.
+        man = dsmod._load_index(self.cfg.root, pdf)
+        if man is not None:
+            m = {"name": str(dsmod._rel(pdf, self.cfg.root)),
+                 "n": man.get("page_count", 1),
+                 "toc": [tuple(r) for r in man.get("toc", [])],
+                 "figs": [(pg, pks) for pg, pks in man.get("pinout_figures", [])],
+                 "sections": man.get("sections", {})}
+        elif shutil.which("pdftotext"):
             pages = dsmod._page_texts(pdf)
             n = len(pages)
             if n and not pages[-1].strip():
@@ -745,9 +753,30 @@ class _State:
                  "figs": dsmod._pinout_figures(pages),
                  "sections": sections}
             with self.lock:
-                self._ds_meta[key] = m
                 self._ds_text[key] = pages
+        else:
+            return None
+        with self.lock:
+            self._ds_meta[key] = m
         return (pdf, m)
+
+    def _ds_pages(self, pdf: Path) -> list[str]:
+        """Per-page text, preferring the committed index (no poppler) over a live parse."""
+        key = str(pdf)
+        with self.lock:
+            pages = self._ds_text.get(key)
+        if pages is not None:
+            return pages
+        full = dsmod._index_dir(self.cfg.root, pdf) / "text" / "full.txt"
+        if full.is_file():
+            pages = full.read_text().split("\f")
+        elif shutil.which("pdftotext"):
+            pages = dsmod._page_texts(pdf)
+        else:
+            pages = []
+        with self.lock:
+            self._ds_text[key] = pages
+        return pages
 
     def datasheet_search(self, idx: int, q: str) -> list[int]:
         q = (q or "").strip()
@@ -757,10 +786,8 @@ class _State:
         if not got:
             return []
         pdf, _ = got
-        with self.lock:
-            pages = self._ds_text.get(str(pdf)) or []
         ql = q.lower()
-        return [i + 1 for i, t in enumerate(pages) if ql in t.lower()]
+        return [i + 1 for i, t in enumerate(self._ds_pages(pdf)) if ql in t.lower()]
 
     def datasheet_png(self, idx: int, page: int, dpi: int = 150):
         if not shutil.which("pdftoppm"):

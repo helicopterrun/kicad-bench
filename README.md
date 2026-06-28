@@ -396,6 +396,51 @@ Sanity check: confirms `kicad-cli` is on PATH and reports which config will be u
 
 ---
 
+## Datasheets — harvest, ingest, read cheaply
+
+**Problem.** Datasheets are big PDFs. Searching them or pulling out a pinout/typical-app
+diagram by re-parsing the PDF (or having an agent open it) is slow and burns tokens, and
+nothing fetches them in the first place.
+
+**What it does.** A PDF is opened (via poppler) **exactly once**, at `ingest`, which extracts
+each kind of data into its own cheap file under `.datasheet-index/<slug>/`:
+
+| File | Holds | Committed? |
+|------|-------|-----------|
+| `text/full.txt`, `text/pNNN.txt` | full + per-page text (for `search`) | yes |
+| `index.json` | metadata, parsed TOC, section→page map, figure list | yes |
+| `figures/*.png` | pinout / typical-app / layout **diagrams**, pre-rendered | no (gitignored) |
+| `registry.json` | part → datasheet provenance | yes |
+
+Afterwards the read commands touch only those artifacts — never the PDF — so they cost no PDF
+parsing, and the text/JSON path needs **no poppler** (works on a fresh clone / in CI). An inner
+`.gitignore` keeps text + JSON in git but figures and the download scratch dir out.
+
+```
+$ kb datasheet fetch tps65150          # find + download + ingest one part's datasheet
+$ kb datasheet fetch --all             # every part with a known URL (symbol field / BOM / override)
+$ kb datasheet fetch C2040 --url URL   # supply a URL after web-searching an unknown part
+$ kb datasheet ingest --all            # (re)build the index for PDFs already on disk
+$ kb datasheet search "soft-start"     # grep ingested TEXT — no PDF, no poppler
+$ kb datasheet figures tps65150 --section pinout --package LQFP48   # pre-rendered PNG path
+$ kb datasheet toc / locate / view     # navigate by the doc's own TOC; prefer the index
+```
+
+**Fetch** resolves a URL in priority order — a `[datasheets]` override in the config, a KiCad
+symbol `Datasheet` field, a BOM `Datasheet` column, then `--url` — downloads via stdlib
+`urllib` (honoring `HTTPS_PROXY`), validates the `%PDF` header to reject HTML interstitials,
+and auto-ingests. Parts with no resolvable URL are *reported* (not failed) so an agent can
+web-search them and re-run with `--url`. Writes only ever land in `Datasheets/` (source PDFs)
+or the regenerable `.datasheet-index/` — design files are never touched. `ingest`/`fetch` need
+poppler-utils; `search`/`figures` do not.
+
+```toml
+[datasheets]                # optional URL overrides, keyed by part/value (hand-edited)
+TPS65150 = "https://www.ti.com/lit/ds/symlink/tps65150.pdf"
+```
+
+---
+
 ## Configuration (`kicad-bench.toml`)
 
 One file holds all project specifics, so the tools stay generic. A config kept in
