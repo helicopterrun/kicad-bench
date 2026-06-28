@@ -37,6 +37,7 @@ brew install poppler. The cheap read commands (`search`, `figures`) do not.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -44,6 +45,7 @@ import shutil
 import ssl
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from collections import Counter
@@ -601,22 +603,45 @@ def _ssl_context() -> ssl.SSLContext:
     return ctx
 
 
-def _download(url: str, dest: Path, root: Path) -> Path:
+def _download(url: str, dest: Path, root: Path, attempts: int = 3) -> Path:
     """Download `url` to `dest`, validating the %PDF magic header first. urllib's default
-    opener honors HTTPS_PROXY from the environment, so we never touch the proxy config."""
-    req = urllib.request.Request(url, headers={"User-Agent": _HTTP_UA})
-    with urllib.request.urlopen(req, timeout=45, context=_ssl_context()) as r:
-        data = r.read()
-    if not data.startswith(b"%PDF"):
-        raise ValueError(f"response is not a PDF (starts with {data[:16]!r}) — likely an "
-                         "HTML interstitial, login wall, or redirect page")
-    tmp = _ensure_index_root(root) / ".tmp"
-    tmp.mkdir(parents=True, exist_ok=True)
-    scratch = tmp / (dest.name + ".part")
-    scratch.write_bytes(data)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    scratch.replace(dest)
-    return dest
+    opener honors HTTPS_PROXY from the environment, so we never touch the proxy config.
+
+    Reads in chunks and retries on a truncated/interrupted transfer (a re-terminating proxy
+    can drop a large PDF mid-stream → IncompleteRead). A non-PDF body is NOT retried — it's a
+    content/policy problem, not a transient one, so it fails fast for the caller to report."""
+    last: Exception | None = None
+    for i in range(attempts):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": _HTTP_UA})
+            buf = bytearray()
+            with urllib.request.urlopen(req, timeout=60, context=_ssl_context()) as r:
+                expected = r.headers.get("Content-Length")
+                while True:
+                    chunk = r.read(65536)
+                    if not chunk:
+                        break
+                    buf.extend(chunk)
+            data = bytes(buf)
+            # A re-terminating proxy can cap a large body and close cleanly (no IncompleteRead),
+            # so cross-check the promised length — never ingest a silently truncated PDF.
+            if expected is not None and len(data) < int(expected):
+                raise http.client.IncompleteRead(data, int(expected) - len(data))
+        except (http.client.IncompleteRead, urllib.error.URLError, TimeoutError, OSError) as e:
+            last = e
+            time.sleep(1 + i)            # brief backoff, then re-request from the top
+            continue
+        if not data.startswith(b"%PDF"):
+            raise ValueError(f"response is not a PDF (starts with {data[:16]!r}) — likely an "
+                             "HTML interstitial, login wall, or redirect page")
+        tmp = _ensure_index_root(root) / ".tmp"
+        tmp.mkdir(parents=True, exist_ok=True)
+        scratch = tmp / (dest.name + ".part")
+        scratch.write_bytes(data)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        scratch.replace(dest)
+        return dest
+    raise last if last else RuntimeError("download failed")
 
 
 def _canonical_pdf_name(part: str, url: str) -> str:
