@@ -59,7 +59,8 @@ INDEX_DIRNAME = ".datasheet-index"     # committed text+JSON; figures/ self-giti
 MAX_VIEW_PAGES = 8
 
 # Bump when the extraction logic changes so `ingest` knows to re-build stale indexes.
-TOOL_VERSION = 1
+# v2: also pre-render the pinout SECTION page (front-page / generic-caption pinouts).
+TOOL_VERSION = 2
 FIGURE_DPI = 150                       # default render DPI for pre-built figure PNGs
 MAX_FIGS_PER_KIND = 3                  # cap typical-app / layout pages rendered per doc
 _HTTP_UA = "Mozilla/5.0 (compatible; kicad-bench datasheet fetch)"
@@ -359,12 +360,26 @@ def _render_figures(pdf: Path, root: Path, sections: dict[str, list[int]],
     figures: list[dict] = []
     if not shutil.which("pdftoppm"):
         return figures
+    # Caption-matched pinout figures first ("Figure N. <pkg> package pinout"), tagged with
+    # their package so `figures --package` can pick one.
+    pinout_pages: set[int] = set()
     for page, pkgs in pin_figs:
         for pk in pkgs:
             name = f"pinout-{_safe(pk)}.png"
             _render_named(pdf, page, name, dpi, root)
             figures.append({"kind": "pinout", "package": pk, "page": page,
                             "path": f"figures/{name}"})
+        pinout_pages.add(page)
+    # Then the detected pinout SECTION page(s) — catches datasheets that put the pin diagram
+    # on the front page or under a generic "Figure 1" caption (no package in the caption), as
+    # long as they aren't already covered by a caption figure above.
+    for page in sections.get("pinout", [])[:MAX_FIGS_PER_KIND]:
+        if page in pinout_pages:
+            continue
+        name = f"pinout-p{page:03d}.png"
+        _render_named(pdf, page, name, dpi, root)
+        figures.append({"kind": "pinout", "page": page, "path": f"figures/{name}"})
+        pinout_pages.add(page)
     for kind in ("typical-app", "layout"):
         for page in sections.get(kind, [])[:MAX_FIGS_PER_KIND]:
             name = f"{kind}-p{page:03d}.png"

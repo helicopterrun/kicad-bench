@@ -236,3 +236,17 @@ def test_ingest_end_to_end_and_idempotent(tmp_path):
     assert ds._ingest_one(pdf, root)["status"] == "skipped"
     # --force re-runs
     assert ds._ingest_one(pdf, root, force=True)["status"] == "ingested"
+
+
+@poppler
+def test_ingest_renders_pinout_section_without_caption(tmp_path):
+    """A pinout on a page with no 'Figure N. <pkg> pinout' caption is still pre-rendered
+    from the detected pinout SECTION (named by page, no package)."""
+    (tmp_path / "Datasheets").mkdir()
+    pdf = tmp_path / "Datasheets" / "front.pdf"
+    _make_pdf(pdf, ["Pin Assignments\nIN 1  OUT 5  (no figure caption on this page)"])
+    man = ds._ingest_one(pdf, tmp_path)["manifest"]
+    pin = [f for f in man["figures"] if f["kind"] == "pinout"]
+    assert pin and pin[0]["page"] == 1 and "package" not in pin[0]
+    assert pin[0]["path"] == "figures/pinout-p001.png"
+    assert (ds._index_dir(tmp_path, pdf) / "figures" / "pinout-p001.png").exists()
