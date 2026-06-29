@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import http.server
 import json
+import os
 import re
 import shutil
 import threading
@@ -189,10 +190,21 @@ function switchTab(kind,i,btn){
   if(kind==="preview") src="/preview/schematic?t="+Date.now();
   else if(kind==="pcb2d") src="/preview/pcb2d?t="+Date.now();
   else if(kind==="pcb3d") src="/preview/pcb3d?t="+Date.now();
+  else if(kind==="parts") src="/preview/parts?t="+Date.now();
   else if(kind==="datasheets") src="/preview/datasheets?t="+Date.now();
   else src="/doc/"+i;
   if(docSrc!==src){ f.src=src; docSrc=src; } f.style.display="block"; sizeFrame();
 }
+// Deep-link from the Parts tab: jump to the Datasheets tab at a given doc + page.
+function openDatasheet(dsIdx,page){
+  document.querySelectorAll("#tabs button").forEach(b=>b.classList.remove("active"));
+  const b=[...document.querySelectorAll("#tabs button")].find(x=>x.textContent==="Datasheets");
+  if(b) b.classList.add("active");
+  curTab="datasheets"; $("auditview").style.display="none"; $("auditctl").style.display="none";
+  const f=$("docframe"), src="/preview/datasheets?ds="+dsIdx+"&page="+(page||1)+"&t="+Date.now();
+  f.src=src; docSrc=src; f.style.display="block"; sizeFrame();
+}
+window.openDatasheet=openDatasheet;
 function toggleMore(){ moreOpen?closeMore():openMore(); }
 function openMore(){ const m=$("tmenu"); if(m){ m.classList.add("open"); moreOpen=true; } }
 function closeMore(){ const m=$("tmenu"); if(m){ m.classList.remove("open"); moreOpen=false; } }
@@ -206,6 +218,7 @@ async function loadTabs(){
   mk("Schematic","preview",null);
   mk("PCB 2D","pcb2d",null);
   mk("PCB 3D","pcb3d",null);
+  mk("Parts","parts",null);
   mk("Datasheets","datasheets",null);
   if(tabs.length){               // doc guides go behind a hamburger so the bar never overflows
     const dd=document.createElement("span"); dd.className="tdd";
@@ -491,7 +504,8 @@ DATASHEETS_PAGE = """<!doctype html><html><head><meta charset="utf-8">
 <div id="chips"></div>
 <div id="stagewrap"><img id="im" class="fit" alt="datasheet page"><span id="msg"></span></div>
 <script>
-let idx=-1, page=1, meta=null, tocOpen=false, full=false;
+let idx=-1, page=1, meta=null, tocOpen=false, full=false, forcePage=0;
+const PARAMS=new URLSearchParams(location.search);
 const im=document.getElementById('im'), msg=document.getElementById('msg'),
       sel=document.getElementById('ds'), tocEl=document.getElementById('toc'),
       wrap=document.getElementById('stagewrap');
@@ -561,7 +575,8 @@ async function load(i){ idx=i; meta=null; document.getElementById('chips').inner
   setMsg('loading…');
   try{ meta=await (await fetch('/api/datasheet?ds='+i)).json(); }
   catch(e){ setMsg('could not read datasheet'); return; }
-  page=lastPage(); setMsg(''); buildToc(); buildChips(); paint();
+  page = forcePage ? Math.max(1,Math.min(forcePage,meta.n)) : lastPage();
+  forcePage=0; setMsg(''); buildToc(); buildChips(); paint();
 }
 async function init(){
   let d; try{ d=await (await fetch('/api/datasheets')).json(); }catch(e){ setMsg('error loading datasheets'); return; }
@@ -570,11 +585,163 @@ async function init(){
   if(!d.poppler){ setMsg('datasheet rendering needs poppler-utils (brew install poppler)'); return; }
   if(!d.items.length){ setMsg('no datasheets in the repo'); return; }
   let start=d.items[0].i;
-  try{ const last=localStorage.getItem('dsv:lastdoc');
-    if(last){ const it=d.items.find(function(x){ return x.name===last; }); if(it) start=it.i; } }catch(e){}
+  // Deep-link from the Parts tab: ?ds=<idx>&page=<n> wins over the remembered doc.
+  const pds=PARAMS.get('ds'), ppg=PARAMS.get('page');
+  if(pds!==null && d.items.some(function(x){ return x.i===+pds; })){
+    start=+pds; if(ppg) forcePage=+ppg;
+  } else {
+    try{ const last=localStorage.getItem('dsv:lastdoc');
+      if(last){ const it=d.items.find(function(x){ return x.name===last; }); if(it) start=it.i; } }catch(e){}
+  }
   sel.value=start; load(start);
 }
 init();
+</script>
+</body></html>"""
+
+
+# "Parts" tab — the BOM/work-list joined to ingested datasheets. Each part shows its MPN /
+# value / LCSC / source, and (when a datasheet is linked) inline pinout-package thumbnails
+# from the ingest index, chips that deep-link into the Datasheets tab at the pinout page, and
+# an on-demand DRAFT pin table (kb datasheet pins) for the human to verify against the figure.
+PARTS_PAGE = """<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><style>
+ html,body{margin:0;height:100%;background:#1b1c1f;color:#d4d7dd;
+   font:13px/1.5 ui-monospace,Menlo,Consolas,monospace;display:flex;flex-direction:column}
+ #bar{position:sticky;top:0;z-index:10;display:flex;gap:12px;align-items:center;flex-wrap:wrap;
+   padding:9px 14px;background:#16171a;border-bottom:1px solid #34363b}
+ #bar .lbl{color:#8a8f98} .cov b{color:#d4d7dd}
+ .cov .ok{color:#5fd38d} .cov .miss{color:#ff7b7b}
+ #q{background:#2d2f34;color:#d4d7dd;border:1px solid #34363b;border-radius:6px;
+   padding:6px 10px;font:inherit;width:150px}
+ label{color:#8a8f98;cursor:pointer;user-select:none}
+ #list{flex:1;min-height:0;overflow:auto;padding:12px;display:grid;gap:10px;
+   grid-template-columns:repeat(auto-fill,minmax(330px,1fr));align-content:start}
+ .card{background:#232427;border:1px solid #34363b;border-left:3px solid #34363b;
+   border-radius:8px;padding:10px 12px}
+ .card.has{border-left-color:#5fd38d} .card.no{border-left-color:#4a2a2a}
+ .pn{font-weight:700;font-size:14px} .val{color:#8a8f98}
+ .meta{display:flex;gap:8px;flex-wrap:wrap;align-items:baseline;margin-bottom:4px}
+ .src{font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:#7fa8d8;
+   background:#1e2a38;border-radius:10px;padding:1px 7px}
+ .lcsc{color:#8a8f98;font-size:12px}
+ .dsname{color:#8a8f98;font-size:12px;margin:2px 0 6px;word-break:break-all}
+ .thumbs{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0}
+ .thumb{border:1px solid #34363b;border-radius:5px;background:#11141a;cursor:pointer;
+   width:84px;height:64px;object-fit:contain;padding:2px}
+ .thumb:hover{border-color:#7fa8d8}
+ .pcap{font-size:10px;color:#8a8f98;text-align:center;width:84px;margin-top:-4px}
+ .chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+ .chip{background:#2d2f34;border:1px solid #34363b;border-radius:13px;padding:4px 10px;
+   color:#d4d7dd;font:inherit;font-size:12px;cursor:pointer}
+ .chip.pin{border-color:#7fa8d8;color:#cfe0e5} .chip:active{background:#383b41}
+ .chip:disabled{opacity:.5;cursor:default}
+ .miss-hint{color:#8a8f98;font-size:12px;margin-top:4px}
+ .miss-hint code{background:#11141a;padding:1px 5px;border-radius:4px;color:#cfe0e5}
+ .pins{margin-top:8px;border-top:1px dashed #34363b;padding-top:6px}
+ .pins .conf{font-size:11px;text-transform:uppercase;letter-spacing:.05em}
+ .pins .medium{color:#5fd38d} .pins .low{color:#ffcc66} .pins .none{color:#ff7b7b}
+ .pins table{border-collapse:collapse;margin:4px 0;font-size:12px}
+ .pins td{padding:1px 8px 1px 0} .pins .num{color:#7fa8d8;text-align:right}
+ .pins .et{color:#8a8f98}
+ .pins .warn{color:#ffcc66;font-size:11px}
+ #lb{position:fixed;inset:0;z-index:50;background:#000c;display:none;align-items:center;
+   justify-content:center;padding:20px}
+ #lb.open{display:flex} #lb img{max-width:96vw;max-height:92vh;border-radius:6px;background:#fff}
+ #empty{color:#8a8f98;padding:30px;text-align:center}
+</style></head><body>
+<div id="bar"><span class="lbl">Parts</span>
+  <span class="cov" id="cov">…</span>
+  <span style="flex:1"></span>
+  <label><input type="checkbox" id="missOnly"> missing only</label>
+  <input id="q" type="search" placeholder="filter parts…">
+</div>
+<div id="list"><div id="empty">loading parts…</div></div>
+<div id="lb" onclick="this.classList.remove('open')"><img id="lbimg" alt="pinout"></div>
+<script>
+const $=id=>document.getElementById(id);
+const esc=s=>(s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+let DATA=null;
+const SECLABEL={"abs-max":"Abs-max","typical-app":"Typical app","layout":"Layout"};
+
+function figURL(slug,path){ return '/preview/ds-figure.png?slug='+encodeURIComponent(slug)+'&path='+encodeURIComponent(path); }
+function openDS(dsidx,page){ if(dsidx==null) return;
+  if(window.parent && window.parent.openDatasheet) window.parent.openDatasheet(dsidx,page||1); }
+function lightbox(url){ $('lbimg').src=url; $('lb').classList.add('open'); }
+
+async function togglePins(slug,pkg,box,btn){
+  if(box.dataset.open==='1'){ box.style.display='none'; box.dataset.open='0'; return; }
+  if(box.dataset.loaded==='1'){ box.style.display='block'; box.dataset.open='1'; return; }
+  btn.disabled=true; box.style.display='block'; box.dataset.open='1'; box.innerHTML='extracting…';
+  let r; try{ r=await (await fetch('/api/part/pins?slug='+encodeURIComponent(slug)
+        +(pkg?'&package='+encodeURIComponent(pkg):''))).json(); }
+  catch(e){ box.innerHTML='<span class="warn">extraction failed</span>'; btn.disabled=false; return; }
+  btn.disabled=false; box.dataset.loaded='1';
+  let h='<span class="conf '+r.confidence+'">pin draft · '+r.confidence
+       +(r.package?' · '+esc(r.package):'')+'</span>';
+  if(r.pins&&r.pins.length){ h+='<table>'+r.pins.map(p=>'<tr><td class="num">'+esc(p.number)
+       +'</td><td>'+esc(p.name)+'</td><td class="et">'+esc(p.etype)+'</td></tr>').join('')+'</table>'; }
+  (r.warnings||[]).forEach(w=>{ h+='<div class="warn">! '+esc(w)+'</div>'; });
+  box.innerHTML=h;
+}
+
+function pinoutPage(ds){ if(ds.pinouts&&ds.pinouts.length) return ds.pinouts[0].page;
+  return (ds.sections&&ds.sections.pinout)||1; }
+
+function card(p){
+  const el=document.createElement('div'); el.className='card '+(p.datasheet?'has':'no');
+  const ds=p.datasheet;
+  let h='<div class="meta"><span class="pn">'+esc(p.part)+'</span>'+
+    (p.value?'<span class="val">'+esc(p.value)+'</span>':'')+
+    '<span style="flex:1"></span><span class="src">'+esc(p.source)+'</span></div>';
+  if(p.lcsc && p.lcsc!==p.part) h+='<div class="lcsc">LCSC '+esc(p.lcsc)+'</div>';
+  if(ds){
+    h+='<div class="dsname">'+esc(ds.pdf)+(ds.page_count?' · '+ds.page_count+'p':'')+'</div>';
+    const thumbs=(ds.pinouts||[]).filter(f=>f.path);
+    if(thumbs.length){ h+='<div class="thumbs">'+thumbs.map(f=>
+        '<div><img class="thumb" loading="lazy" src="'+figURL(ds.slug,f.path)+'" '+
+        'data-full="'+figURL(ds.slug,f.path)+'" title="'+esc(f.package||'')+' p'+f.page+'">'+
+        '<div class="pcap">'+esc(f.package||('p'+f.page))+'</div></div>').join('')+'</div>'; }
+    h+='<div class="chips">'+
+       '<button class="chip pin" data-act="ds" data-i="'+ds.dsidx+'" data-pg="'+pinoutPage(ds)+'">Datasheet ↗</button>'+
+       '<button class="chip" data-act="pins" data-slug="'+esc(ds.slug)+'" data-pkg="'+esc((ds.packages&&ds.packages.length===1)?ds.packages[0]:'')+'">Pins ▾</button>';
+    ['abs-max','typical-app','layout'].forEach(k=>{ const pg=ds.sections&&ds.sections[k];
+       if(pg) h+='<button class="chip" data-act="ds" data-i="'+ds.dsidx+'" data-pg="'+pg+'">'+SECLABEL[k]+'</button>'; });
+    h+='</div><div class="pins" style="display:none"></div>';
+  } else {
+    h+='<div class="miss-hint">no local datasheet · <code>kb datasheet fetch '+esc(p.part)+'</code></div>';
+  }
+  el.innerHTML=h;
+  el.querySelectorAll('.thumb').forEach(im=>im.onclick=()=>lightbox(im.dataset.full));
+  el.querySelectorAll('[data-act=ds]').forEach(b=>b.onclick=()=>openDS(+b.dataset.i,+b.dataset.pg));
+  const pb=el.querySelector('[data-act=pins]');
+  if(pb){ const box=el.querySelector('.pins');
+    pb.onclick=()=>togglePins(pb.dataset.slug,pb.dataset.pkg,box,pb); }
+  return el;
+}
+
+function render(){
+  const q=$('q').value.trim().toLowerCase(), miss=$('missOnly').checked;
+  const list=$('list'); list.innerHTML='';
+  let shown=0;
+  DATA.parts.forEach(p=>{
+    if(miss && p.datasheet) return;
+    if(q && !((p.part+' '+(p.value||'')+' '+(p.lcsc||'')).toLowerCase().includes(q))) return;
+    list.appendChild(card(p)); shown++;
+  });
+  if(!shown){ const e=document.createElement('div'); e.id='empty';
+    e.textContent='no parts match'; list.appendChild(e); }
+}
+async function load(){
+  let d; try{ d=await (await fetch('/api/parts')).json(); }
+  catch(e){ $('list').innerHTML='<div id="empty">could not load parts</div>'; return; }
+  DATA=d; const c=d.coverage;
+  $('cov').innerHTML='<b>'+c.total+'</b> parts · <span class="ok"><b>'+c.with_ds+
+    '</b> with datasheet</span> · <span class="miss"><b>'+c.missing.length+'</b> missing</span>';
+  render();
+}
+$('q').oninput=render; $('missOnly').onchange=render;
+load();
 </script>
 </body></html>"""
 
@@ -597,6 +764,9 @@ class _State:
         # Datasheet viewer: per-PDF meta (parsed TOC + page count), parsed once
         self._ds_meta: dict = {}                   # str(pdf) -> {"name","n","toc","figs"}
         self._ds_text: dict = {}                   # str(pdf) -> page texts (for in-doc search)
+        # Parts tab: work-list⋈datasheets overview, cached by BOM+index mtime
+        self._parts_cache: dict | None = None
+        self._parts_sig_val = None
 
     def _mtime(self):
         p = self.cfg.pcb
@@ -812,6 +982,53 @@ class _State:
         except OSError:
             return None
 
+    # ---- Parts tab: BOM/work-list joined to ingested datasheets (pinouts per part) ----
+    def _parts_sig(self):
+        """Cheap change signal: BOM mtime + index-root mtime (bumps on ingest/fetch)."""
+        bom = self.cfg.bom
+        ir = dsmod._index_root(self.cfg.root)
+        bm = bom.stat().st_mtime if bom and bom.exists() else 0
+        im = ir.stat().st_mtime if ir.exists() else 0
+        return (bm, im)
+
+    def parts(self) -> dict:
+        sig = self._parts_sig()
+        with self.lock:
+            if self._parts_cache is not None and self._parts_sig_val == sig:
+                return self._parts_cache
+        ov = dsmod.parts_overview(self.cfg)
+        # Attach each linked datasheet's index in the Datasheets-tab list, for deep-linking.
+        idx_by_slug = {dsmod._slug(p): i for i, p in enumerate(self.datasheet_list())}
+        for p in ov["parts"]:
+            if p["datasheet"]:
+                p["datasheet"]["dsidx"] = idx_by_slug.get(p["datasheet"]["slug"])
+        with self.lock:
+            self._parts_cache, self._parts_sig_val = ov, sig
+        return ov
+
+    def ds_figure(self, slug: str, relpath: str):
+        """Bytes of a pre-rendered index figure PNG (figures/…), or None. Path-guarded:
+        the slug must be a real index dir and relpath must stay under its figures/."""
+        if not re.fullmatch(r"[A-Za-z0-9._]+", slug or ""):
+            return None
+        idir = dsmod._index_root(self.cfg.root) / slug
+        target = (idir / relpath).resolve()
+        figdir = (idir / "figures").resolve()
+        if not str(target).startswith(str(figdir) + os.sep) or not target.is_file():
+            return None
+        try:
+            return target.read_bytes()
+        except OSError:
+            return None
+
+    def part_pins(self, slug: str, package: str | None):
+        """Best-effort DRAFT pin table for one ingested datasheet (by index slug)."""
+        man = next((m for d, m in dsmod._index_entries(self.cfg.root) if d.name == slug), None)
+        if not man:
+            return None
+        pages = dsmod._cached_or_live_pages(self.cfg.root, self.cfg.root / man["pdf"])
+        return dsmod.extract_pin_table(pages, man.get("sections", {}).get("pinout", []), package)
+
 
 def _make_handler(state: _State):
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -894,6 +1111,22 @@ def _make_handler(state: _State):
                 data = state.pcb_png(self._side())
                 if not data:
                     self._send(404, b"3D render not ready", "text/plain")
+                else:
+                    self._send(200, data, "image/png")
+            elif path == "/preview/parts":
+                self._send(200, PARTS_PAGE.encode(), "text/html; charset=utf-8")
+            elif path == "/api/parts":
+                self._send(200, json.dumps(state.parts()).encode(), "application/json")
+            elif path == "/api/part/pins":
+                r = state.part_pins(self._qstr("slug"), self._qstr("package") or None)
+                if r is None:
+                    self._send(404, b"no such ingested datasheet", "text/plain")
+                else:
+                    self._send(200, json.dumps(r).encode(), "application/json")
+            elif path == "/preview/ds-figure.png":
+                data = state.ds_figure(self._qstr("slug"), self._qstr("path"))
+                if not data:
+                    self._send(404, b"figure not rendered on this host", "text/plain")
                 else:
                     self._send(200, data, "image/png")
             elif path == "/preview/datasheets":

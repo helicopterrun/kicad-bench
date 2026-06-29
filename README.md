@@ -382,6 +382,11 @@ dark dashboard: the verdict, a "fix next" list of every error, and every check w
 expandable findings. It watches the board's mtime and re-audits automatically when you save
 in KiCad, caching by mtime so extra tabs/polls don't trigger redundant DRC runs. Read-only.
 
+Tabs beside the audit: **Schematic** / **PCB 2D** / **PCB 3D** previews, a **Datasheets**
+browser, and **Parts** — the BOM/work-list joined to the ingested datasheets, with a coverage
+count, per-part pinout-package thumbnails, an on-demand DRAFT pin table (see `datasheet pins`
+below), and chips that deep-link into the Datasheets tab at the pinout/abs-max/layout page.
+
 ```
 $ kb sidecar --config CFG            # → http://127.0.0.1:8765
 $ kb sidecar --host 0.0.0.0 --port 9000
@@ -424,7 +429,18 @@ $ kb datasheet ingest --all            # (re)build the index for PDFs already on
 $ kb datasheet search "soft-start"     # grep ingested TEXT — no PDF, no poppler
 $ kb datasheet figures tps65150 --section pinout --package LQFP48   # pre-rendered PNG path
 $ kb datasheet toc / locate / view     # navigate by the doc's own TOC; prefer the index
+$ kb datasheet parts                   # BOM/work-list ⋈ datasheets — coverage + provenance
+$ kb datasheet pins ap2112k --package SOT25 [--json]   # DRAFT scaffold pin table
 ```
+
+**Parts** joins the work-list (BOM rows, symbol `Datasheet` fields, `[datasheets]` overrides,
+`Imported CAD/<LCSC>/` dirs) to the ingested datasheets — matched by registry, recorded
+`source_url`, LCSC dir, then normalized name/stem — so you see which parts have a local
+datasheet and which still need `fetch`. **Pins** is a best-effort extraction of a pin
+*description table* into scaffold-ready pins `[{number,name,etype}]`; multi-package tables
+take `--package`, and `--json` emits a `{meta,pins}` spec to pipe into `kp scaffold`. It is a
+**DRAFT to verify against the rendered pinout figure** — it parses clean row-tables well,
+declines safely on rotated/BGA grids (rather than emitting garbage), and flags low confidence.
 
 **Fetch** resolves a URL in priority order — a `[datasheets]` override in the config, a KiCad
 symbol `Datasheet` field, a BOM `Datasheet` column, then `--url` — downloads via stdlib

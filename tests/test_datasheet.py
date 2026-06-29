@@ -203,3 +203,63 @@ def test_ingest_end_to_end_and_idempotent(tmp_path):
     assert ds._ingest_one(pdf, root)["status"] == "skipped"
     # --force re-runs
     assert ds._ingest_one(pdf, root, force=True)["status"] == "ingested"
+
+
+# -- pin-table extraction (datasheet -> scaffold-ready DRAFT pins) ---------
+# A multi-package pin-description table in pdftotext -layout style (offsets matter):
+# three package number columns, a multi-pin "6, 7" cell, an absent "—" cell, and NC rows.
+_MULTI_PKG_PAGE = (
+    "Pin Descriptions\n"
+    "\n"
+    "                  Pin Number\n"
+    "                                              Pin Name              Function\n"
+    "   SOT25          SOT89-5        SO-8\n"
+    "     1              4             8           VIN          Input Voltage\n"
+    "     2              2            6, 7         GND          Ground\n"
+    "     3              3             5           EN           Chip Enable\n"
+    "     —              1           2, 3, 4       NC           No Connection\n"
+    "     5              5             1           VOUT         Output Voltage\n"
+    "\n"
+    "Functional Block Diagram\n"
+)
+
+
+def test_extract_pin_table_picks_package_column():
+    r = ds.extract_pin_table([_MULTI_PKG_PAGE], [1], package="SOT25")
+    assert [(p["number"], p["name"]) for p in r["pins"]] == [
+        ("1", "VIN"), ("2", "GND"), ("3", "EN"), ("5", "VOUT")]   # NC absent (—) for SOT25
+    assert r["package"] == "SOT25" and r["confidence"] == "medium"
+
+
+def test_extract_pin_table_expands_multipin_and_nc():
+    r = ds.extract_pin_table([_MULTI_PKG_PAGE], [1], package="SO-8")
+    nums = {p["name"]: [q["number"] for q in r["pins"] if q["name"] == p["name"]]
+            for p in r["pins"]}
+    assert nums["GND"] == ["6", "7"]                 # "6, 7" expands to two pins
+    assert nums["NC"] == ["2", "3", "4"]
+    assert all(p["etype"] == "no_connect" for p in r["pins"] if p["name"] == "NC")
+    assert next(p["etype"] for p in r["pins"] if p["name"] == "VIN") == "power_in"
+
+
+def test_extract_pin_table_ambiguous_without_package():
+    r = ds.extract_pin_table([_MULTI_PKG_PAGE], [1])
+    assert r["confidence"] == "low"                  # multi-package + no pick → low
+    assert any("package column" in w for w in r["warnings"])
+
+
+def test_extract_pin_table_safe_decline():
+    r = ds.extract_pin_table(["just prose, no pin table here at all"], [1])
+    assert r["pins"] == [] and r["confidence"] == "none"
+
+
+# -- part <-> ingested datasheet linkage + overview -----------------------
+def test_link_manifest_by_lcsc_dir():
+    entries = [(Path("x"), {"pdf": "Imported CAD/C16214/datasheet.pdf", "mpn": "datasheet"})]
+    got = ds._link_manifest("SomePart", "", "C16214", "", entries, {"parts": {}})
+    assert got is not None and got[1]["pdf"].endswith("C16214/datasheet.pdf")
+
+
+def test_link_manifest_by_name_stem():
+    entries = [(Path("y"), {"pdf": "Datasheets/ap2112k-3.3.pdf", "mpn": "ap2112k-3.3"})]
+    got = ds._link_manifest("AP2112K-3.3TRG1", "", "", "", entries, {"parts": {}})
+    assert got is not None and got[1]["mpn"] == "ap2112k-3.3"
