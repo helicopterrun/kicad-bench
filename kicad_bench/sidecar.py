@@ -546,7 +546,7 @@ function jump(pg){ page=pg; if(full) toggleZoom(); paint(); }
 function mkchip(parent,label,pg,isPin){ const b=document.createElement('button');
   b.className='chip'+(isPin?' pin':''); b.textContent=label;
   b.onclick=function(){ jump(pg); }; parent.appendChild(b); }
-const SECKW={pinout:['pinout','pin configuration','pin description','pin assignment'],
+const SECKW={pinout:['pinout','pin configuration','pin description','pin assignment','pin definition'],
   'abs-max':['absolute maximum'],
   'typical-app':['typical application','application information','application circuit','application schematic'],
   layout:['layout','land pattern','recommended footprint']};
@@ -702,6 +702,10 @@ function card(p){
         '<div><img class="thumb" loading="lazy" src="'+figURL(ds.slug,f.path)+'" '+
         'data-full="'+figURL(ds.slug,f.path)+'" title="'+esc(f.package||'')+' p'+f.page+'">'+
         '<div class="pcap">'+esc(f.package||('p'+f.page))+'</div></div>').join('')+'</div>'; }
+    else if(ds.sections&&ds.sections.pinout&&ds.dsidx!=null){   // no captioned figure → render the pinout PAGE
+        const pg=ds.sections.pinout, u='/preview/datasheet.png?ds='+ds.dsidx+'&page='+pg;
+        h+='<div class="thumbs"><div><img class="thumb" loading="lazy" src="'+u+'" '+
+           'data-full="'+u+'" title="pinout p'+pg+'"><div class="pcap">Pinout p'+pg+'</div></div></div>'; }
     h+='<div class="chips">'+
        '<button class="chip pin" data-act="ds" data-i="'+ds.dsidx+'" data-pg="'+pinoutPage(ds)+'">Datasheet ↗</button>'+
        '<button class="chip" data-act="pins" data-slug="'+esc(ds.slug)+'" data-pkg="'+esc((ds.packages&&ds.packages.length===1)?ds.packages[0]:'')+'">Pins ▾</button>';
@@ -914,7 +918,7 @@ class _State:
             if n and not pages[-1].strip():
                 n -= 1
             loc = dsmod._locate_pages(pages)
-            toc_idx = dsmod._toc_pages(loc)
+            toc_idx = dsmod._toc_pages(loc) | dsmod._leader_toc_pages(pages)
             sections = {k: [p for p in loc[k] if p not in toc_idx]
                         for k in ("pinout", "abs-max", "typical-app", "layout")}
             m = {"name": str(dsmod._rel(pdf, self.cfg.root)),

@@ -59,7 +59,7 @@ INDEX_DIRNAME = ".datasheet-index"     # committed text+JSON; figures/ self-giti
 MAX_VIEW_PAGES = 8
 
 # Bump when the extraction logic changes so `ingest` knows to re-build stale indexes.
-TOOL_VERSION = 1
+TOOL_VERSION = 2
 FIGURE_DPI = 150                       # default render DPI for pre-built figure PNGs
 MAX_FIGS_PER_KIND = 3                  # cap typical-app / layout pages rendered per doc
 _HTTP_UA = "Mozilla/5.0 (compatible; kicad-bench datasheet fetch)"
@@ -67,7 +67,7 @@ _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 
 # Section -> locator regex (case-insensitive, matched against each page's text).
 SECTION_PATTERNS = {
-    "pinout":      r"pin (configuration|function|assignment|description)s?|pin layout|terminal (configuration|function)",
+    "pinout":      r"pin (configuration|function|assignment|description|definition)s?|pin layout|terminal (configuration|function)",
     "abs-max":     r"absolute maximum",
     "typical-app": r"typical application|application (information|circuit|schematic)",
     "layout":      r"layout (guideline|consideration|example|recommendation)|recommended.*layout|pcb layout|land pattern|package outline",
@@ -229,6 +229,14 @@ def _toc_pages(loc: dict[str, list[int]]) -> set[int]:
     return {p for p, n in c.items() if n >= 3}
 
 
+def _leader_toc_pages(pages: list[str]) -> set[int]:
+    """1-based pages that are a table of contents — identified by many dotted-leader entries
+    ('Pin Definitions . . . . 27'). Excluded from the section map so a TOC line naming a
+    section isn't mistaken for that section's real page (a single section keyword on a TOC
+    page slips past the >=3 rule in _toc_pages)."""
+    return {i + 1 for i, t in enumerate(pages) if len(_toc_entries(t)) >= 5}
+
+
 def _slug(pdf: Path) -> str:
     return _norm(pdf.parent.name + "_" + pdf.stem) or pdf.stem
 
@@ -376,7 +384,7 @@ def _render_figures(pdf: Path, root: Path, sections: dict[str, list[int]],
 def _build_manifest(pdf: Path, root: Path, pages: list[str], source_url: str | None,
                     dpi: int) -> dict:
     loc = _locate_pages(pages)
-    toc_idx = _toc_pages(loc)
+    toc_idx = _toc_pages(loc) | _leader_toc_pages(pages)
     sections = {k: [p for p in loc[k] if p not in toc_idx] for k in SECTION_PATTERNS}
     pin_figs = _pinout_figures(pages)
     figures = _render_figures(pdf, root, sections, pin_figs, dpi)

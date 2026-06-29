@@ -263,3 +263,23 @@ def test_link_manifest_by_name_stem():
     entries = [(Path("y"), {"pdf": "Datasheets/ap2112k-3.3.pdf", "mpn": "ap2112k-3.3"})]
     got = ds._link_manifest("AP2112K-3.3TRG1", "", "", "", entries, {"parts": {}})
     assert got is not None and got[1]["mpn"] == "ap2112k-3.3"
+
+
+def test_leader_toc_page_excluded_from_sections():
+    # A TOC page naming "Pin Definitions" must NOT be picked as the pinout page; the real
+    # heading page should win. _leader_toc_pages flags the dotted-leader TOC.
+    pages = [
+        "Contents\n"
+        "1 Overview . . . . . . . . . . . . . 2\n"
+        "2 Electrical . . . . . . . . . . . . 5\n"
+        "3 Absolute Maximum Ratings . . . . . 8\n"
+        "5 Pin Definitions . . . . . . . . . 27\n"
+        "6 Package . . . . . . . . . . . . . 33\n",                 # page 1 = TOC
+        "regular body text, nothing here",                          # page 2
+        "5. Pin Definitions\nThe CP2102N QFN28 pin definitions follow.",  # page 3 = real
+    ]
+    assert ds._leader_toc_pages(pages) == {1}
+    loc = ds._locate_pages(pages)
+    toc = ds._toc_pages(loc) | ds._leader_toc_pages(pages)
+    pinout = [p for p in loc["pinout"] if p not in toc]
+    assert pinout == [3] and 1 not in pinout                         # TOC dropped, heading kept
