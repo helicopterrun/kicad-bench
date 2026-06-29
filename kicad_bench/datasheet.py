@@ -30,6 +30,8 @@ provenance. Writes only ever land in `Datasheets/` (source) or the regenerable
   kb datasheet toc tps65150               # the document's own table of contents
   kb datasheet locate tps65150            # section -> page (pinout/abs-max/…)
   kb datasheet view /tmp/szza036c.pdf --toc 3.2     # query can be a direct PDF path
+  kb datasheet parts                      # BOM/work-list ⋈ datasheets (coverage view)
+  kb datasheet pins ap2112k --package SOT25 --json  # DRAFT scaffold pin table (→ kp scaffold)
 
 `ingest`/`fetch` require poppler-utils (pdftotext/pdftoppm): apt-get install poppler-utils /
 brew install poppler. The cheap read commands (`search`, `figures`) do not.
@@ -543,15 +545,18 @@ def _work_list(cfg: cfgmod.Config) -> list[dict]:
     from .core import schparse
     out: dict[str, dict] = {}
 
-    def add(part: str, source: str, url: str = "", lcsc: str = "") -> None:
+    def add(part: str, source: str, url: str = "", lcsc: str = "", value: str = "") -> None:
         part = part.strip()
         if not part:
             return
-        cur = out.setdefault(part, {"part": part, "source": source, "url": "", "lcsc": ""})
+        cur = out.setdefault(part, {"part": part, "source": source, "url": "",
+                                    "lcsc": "", "value": ""})
         if url and not cur["url"]:
             cur["url"], cur["source"] = url, source
         if lcsc and not cur["lcsc"]:
             cur["lcsc"] = lcsc
+        if value and not cur["value"]:
+            cur["value"] = value
 
     for part, url in _toml_overrides(cfg).items():
         add(part, "toml-override", url=url)
@@ -559,13 +564,300 @@ def _work_list(cfg: cfgmod.Config) -> list[dict]:
         add(val, "symbol-field", url=url)
     if cfg.bom and cfg.bom.exists():
         for e in _bom_entries(_read_xlsx_rows(cfg.bom)):
-            add(e["mpn"] or e["lcsc"], "bom", url=e["url"], lcsc=e["lcsc"])
+            add(e["mpn"] or e["lcsc"], "bom", url=e["url"], lcsc=e["lcsc"],
+                value=e["value"])
     icad = cfg.root / "Imported CAD"
     if icad.is_dir():
         for d in sorted(icad.iterdir()):
             if d.is_dir():
                 add(d.name, "imported-cad")
     return list(out.values())
+
+
+# ── part ↔ ingested-datasheet linkage + BOM overview (sidecar / `kb datasheet parts`) ─
+
+def _lcsc_from_pdf(pdf_rel: str) -> str:
+    """If a manifest's PDF lives under 'Imported CAD/<LCSC>/datasheet.pdf', the dir name
+    is the LCSC part number — the only identifier those generic 'datasheet.pdf' files carry."""
+    parts = Path(pdf_rel).parts
+    if len(parts) >= 2 and _norm(parts[0]) == "importedcad":
+        return parts[-2]
+    return ""
+
+
+def _link_manifest(part: str, value: str, lcsc: str, url: str,
+                   entries: list[tuple[Path, dict]], reg: dict):
+    """Best (idir, manifest) for a work-list part, or None. Priority: registry local_pdf
+    → recorded source_url → LCSC dir → normalized name/stem substring (longest wins)."""
+    qn, vn, ln = _norm(part), _norm(value), _norm(lcsc)
+    by_pdf = {man.get("pdf"): (d, man) for d, man in entries}
+    for rp, e in reg.get("parts", {}).items():            # 1. registry part -> local_pdf
+        if _norm(rp) == qn and e.get("local_pdf") in by_pdf:
+            return by_pdf[e["local_pdf"]]
+    if url:                                                # 2. recorded source_url
+        for d, man in entries:
+            if man.get("source_url") and man["source_url"] == url:
+                return (d, man)
+    if ln:                                                 # 3. Imported CAD/<lcsc>/ dir
+        for d, man in entries:
+            if _norm(_lcsc_from_pdf(man.get("pdf", ""))) == ln:
+                return (d, man)
+    best = None                                            # 4. name/stem substring match
+    for d, man in entries:
+        for key in (_norm(Path(man.get("pdf", "")).stem), _norm(man.get("mpn", ""))):
+            if len(key) < 4:
+                continue
+            for q in (qn, vn):
+                if q and (key in q or q in key) and (best is None or len(key) > best[0]):
+                    best = (len(key), d, man)
+    return (best[1], best[2]) if best else None
+
+
+def parts_overview(cfg: cfgmod.Config) -> dict:
+    """Join the work-list (BOM/symbol/override/Imported CAD) to ingested datasheets, for
+    the sidecar Parts tab and `kb datasheet parts`. Pure index reads — no PDF, no poppler.
+    Returns {"parts":[{part,value,lcsc,source,url,datasheet:None|{…}}], "coverage":{…}}."""
+    root = cfg.root
+    entries = _index_entries(root)
+    reg = _load_registry(root)
+    parts, missing = [], []
+    for e in _work_list(cfg):
+        link = _link_manifest(e["part"], e.get("value", ""), e.get("lcsc", ""),
+                              e.get("url", ""), entries, reg)
+        ds = None
+        if link:
+            idir, man = link
+            ds = {
+                "slug": idir.name,
+                "pdf": man.get("pdf"),
+                "mpn": man.get("mpn"),
+                "page_count": man.get("page_count", 1),
+                "packages": man.get("packages", []),
+                "pinouts": [{"package": f.get("package"), "page": f["page"], "path": f["path"]}
+                            for f in man.get("figures", []) if f.get("kind") == "pinout"],
+                "sections": {k: (v[0] if v else None)
+                             for k, v in man.get("sections", {}).items()},
+            }
+        else:
+            missing.append(e["part"])
+        parts.append({"part": e["part"], "value": e.get("value", ""),
+                      "lcsc": e.get("lcsc", ""), "source": e.get("source", ""),
+                      "url": e.get("url", ""), "datasheet": ds})
+    parts.sort(key=lambda p: (p["datasheet"] is None, p["part"].lower()))
+    return {"parts": parts,
+            "coverage": {"total": len(parts),
+                         "with_ds": sum(1 for p in parts if p["datasheet"]),
+                         "missing": missing}}
+
+
+# ── pin-table extraction (datasheet → scaffold-ready draft pins for kicad-parts) ──
+
+# Package-name token in a pin-table column header (SOT25, SO-8, LQFP48, UFQFPN48, …).
+_PKG_HDR = re.compile(
+    r"\b(?:SO|SOT|SOIC|SOP|TSSOP|SSOP|MSOP|HMSOP|QFN|LQFP|TQFP|QFP|DFN|TDFN|UDFN|UFQFPN|"
+    r"VQFN|WLCSP|CSP|BGA|UFBGA|TFBGA|LFBGA|DIP|PDIP|MLF|VSON|HVSON|SC|DSBGA)[-\s]?\d[\w./-]*",
+    re.I)
+# A pin-number cell: an int, a comma/slash list of ints, a BGA ball (A1, AB12), or N/A.
+_NUMCELL = re.compile(r"^(?:\d+(?:\s*[,/]\s*\d+)*|[A-Pa-p]{1,2}\d{1,2}|[—–\-]+|N/?A)$")
+_NAME_HDR = re.compile(r"pin\s*name|^name\b|symbol|signal\s*name|signal\b", re.I)
+_NUM_HDR = re.compile(r"pin\s*(?:number|no\.?|#)|^no\.?\b|number|^pin\b|ball|terminal", re.I)
+_TYPE_HDR = re.compile(r"\btype\b|i\s*/\s*o|^i/o|direction|\bdir\b", re.I)
+_FUNC_HDR = re.compile(r"function|description|\bdesc\b", re.I)
+# A plausible pin/signal name (first token of the name cell): starts with a letter/~, no spaces.
+_PINNAME = re.compile(r"^[A-Za-z~][\w/+().\-]{0,23}$")
+# Heading that means the pin-description table has ended.
+_SECT_END = re.compile(
+    r"^\s*(?:functional|absolute\s+maximum|ordering|electrical|recommended\s+operating|"
+    r"features|block\s+diagram|application|figure\s+\d|table\s+\d|note\s*\d*\s*:)", re.I)
+
+_PWR_HI = {"vdd", "vcc", "vbat", "vin", "vout", "vsys", "avdd", "dvdd", "vddio", "vddа",
+           "vpp", "vref", "vcca", "vccb", "vdda", "vbus", "v+", "vp"}
+_PWR_GND = {"gnd", "vss", "agnd", "dgnd", "pgnd", "vssa", "vssio", "ep", "epad", "v-", "vn"}
+_TYPE_TOK = {
+    "i": "input", "in": "input", "input": "input",
+    "o": "output", "out": "output", "output": "output",
+    "io": "bidirectional", "i/o": "bidirectional", "b": "bidirectional",
+    "bidir": "bidirectional", "bidirectional": "bidirectional",
+    "p": "power_in", "pwr": "power_in", "power": "power_in", "supply": "power_in",
+    "s": "power_in", "g": "power_in", "gnd": "power_in", "ground": "power_in",
+    "nc": "no_connect", "dnc": "no_connect", "n.c.": "no_connect",
+    "a": "passive", "analog": "passive", "passive": "passive", "pas": "passive",
+}
+
+
+def _guess_etype(name: str, type_tok: str) -> str:
+    """Map a datasheet Type/I-O token (or, failing that, the pin name) to a KiCad etype."""
+    t = _norm(type_tok)
+    if t in _TYPE_TOK:
+        return _TYPE_TOK[t]
+    n = name.strip().lower().strip("~")
+    base = re.sub(r"[/_\d].*$", "", n)
+    if n in {"nc", "dnc", "n.c."}:
+        return "no_connect"
+    if n in _PWR_GND or base in _PWR_GND:
+        return "power_in"
+    if n in _PWR_HI or base in _PWR_HI:
+        return "power_in"
+    return "passive"
+
+
+def _header_anchors(lines: list[str], hdr_i: int):
+    """From the header band around line hdr_i (which carries a name keyword), collect column
+    anchors as [(offset, role, label)]. Package columns each become a 'num' anchor; the name,
+    type and function columns one anchor each. Returns the anchor list sorted by offset."""
+    anchors: list[tuple[int, str, str]] = []
+    band = range(max(0, hdr_i - 1), min(len(lines), hdr_i + 3))
+    seen_roles: set[str] = set()
+    for i in band:
+        ln = lines[i]
+        for m in _PKG_HDR.finditer(ln):
+            anchors.append((m.start(), "num", m.group(0).strip()))
+        for rx, role in ((_NAME_HDR, "name"), (_TYPE_HDR, "type"), (_FUNC_HDR, "func")):
+            if role in seen_roles:
+                continue
+            m = rx.search(ln)
+            if m:
+                anchors.append((m.start(), role, role))
+                seen_roles.add(role)
+    if not any(a[1] == "num" for a in anchors):       # single, non-package number column
+        for i in band:
+            m = _NUM_HDR.search(lines[i])
+            if m:
+                anchors.append((m.start(), "num", "pin"))
+                break
+    anchors.sort()
+    return anchors
+
+
+def _slice_row(line: str, anchors) -> list[str]:
+    """Slice a data line into cells at the anchor offsets (tolerant: each cell spans from a
+    little before its anchor to the next anchor)."""
+    cells = []
+    for i, (off, _role, _lab) in enumerate(anchors):
+        start = max(0, off - 3)
+        end = anchors[i + 1][0] - 3 if i + 1 < len(anchors) else len(line)
+        cells.append(line[start:max(start, end)].strip())
+    return cells
+
+
+def _pick_num_col(anchors, package: str | None):
+    """Index of the number column to use. With a package, the column whose label matches;
+    else the sole number column. Returns (index, label, ambiguous_labels)."""
+    nums = [(i, a[2]) for i, a in enumerate(anchors) if a[1] == "num"]
+    if package:
+        pn = _norm(package)
+        for i, lab in nums:
+            if pn in _norm(lab) or _norm(lab) in pn:
+                return i, lab, []
+    if len(nums) == 1:
+        return nums[0][0], nums[0][1], []
+    return (nums[0][0], nums[0][1], [lab for _, lab in nums]) if nums else (None, "", [])
+
+
+# Page-footer / junk that column-slicing can mistake for a signal name.
+_JUNK_NAME = re.compile(r"docid|www|http|datasheet|table|figure|^rev|^page$|^\d{3,}$", re.I)
+
+
+def _valid_pinname(name: str) -> bool:
+    return bool(name and _PINNAME.match(name) and not _JUNK_NAME.search(name))
+
+
+def _parse_table_page(lines: list[str], anchors, num_i: int, name_i: int,
+                      type_i: int | None) -> list[dict]:
+    """Parse one page's data rows given established column anchors. Skips non-data lines
+    (continuation / junk) rather than stopping, so multi-line rows survive."""
+    pins: list[dict] = []
+    blanks = 0
+    for ln in lines:
+        if not ln.strip():
+            blanks += 1
+            if blanks >= 3 and pins:
+                break
+            continue
+        if _SECT_END.search(ln) and pins:
+            break
+        blanks = 0
+        cells = _slice_row(ln, anchors)
+        if num_i >= len(cells) or name_i >= len(cells):
+            continue
+        num_cell = cells[num_i]
+        name = re.split(r"\s{2,}", cells[name_i])[0].strip()
+        if not (_valid_pinname(name) and _NUMCELL.match(num_cell)):
+            continue
+        if re.match(r"^[—–\-]+$|^N/?A$", num_cell, re.I):
+            continue                           # pin absent in this package
+        type_tok = cells[type_i] if (type_i is not None and type_i < len(cells)) else ""
+        et = _guess_etype(name, type_tok)
+        for n in re.split(r"\s*[,/]\s*", num_cell):
+            if n.strip():
+                pins.append({"number": n.strip(), "name": name, "etype": et})
+    return pins
+
+
+def extract_pin_table(pages: list[str], pinout_pages: list[int],
+                      package: str | None = None) -> dict:
+    """Best-effort parse of a pin-description TABLE into scaffold-ready draft pins. Returns
+    {"pins":[{number,name,etype}], "package","source_page","packages_available",
+     "confidence","warnings"}. This is a DRAFT to verify against the rendered pinout figure
+     — datasheet tables vary too much to trust blindly. Strategy: score every candidate
+    header page and keep the one yielding the most valid pins, then continue onto following
+    pages that reuse the same columns (multi-page MCU pin tables)."""
+    cand = [p for p in (pinout_pages or range(1, len(pages) + 1)) if 1 <= p <= len(pages)]
+    best = None                                # (pin_count, page, anchors, num_i, name_i, type_i, lab, ambig)
+    for pg in cand:
+        lines = pages[pg - 1].splitlines()
+        hdr_i = next((i for i, ln in enumerate(lines)
+                      if _NAME_HDR.search(ln) and len(ln) < 220), None)
+        if hdr_i is None:
+            continue
+        anchors = _header_anchors(lines, hdr_i)
+        name_i = next((i for i, a in enumerate(anchors) if a[1] == "name"), None)
+        num_i, lab, ambig = _pick_num_col(anchors, package)
+        if name_i is None or num_i is None:
+            continue
+        type_i = next((i for i, a in enumerate(anchors) if a[1] == "type"), None)
+        pins = _parse_table_page(lines[hdr_i + 1:], anchors, num_i, name_i, type_i)
+        if pins and (best is None or len(pins) > best[0]):
+            best = (len(pins), pg, anchors, num_i, name_i, type_i, lab, ambig)
+    if best is None:
+        return {"pins": [], "package": package, "source_page": None,
+                "packages_available": [], "confidence": "none",
+                "warnings": ["no pin-description table found — read the pinout figure "
+                             "and enter pins by hand"]}
+    _n, pg, anchors, num_i, name_i, type_i, lab, ambig = best
+    lines = pages[pg - 1].splitlines()
+    hdr_i = next(i for i, ln in enumerate(lines) if _NAME_HDR.search(ln) and len(ln) < 220)
+    pkgs_here = [a[2] for a in anchors if a[1] == "num" and a[2] != "pin"]
+    pins = _parse_table_page(lines[hdr_i + 1:], anchors, num_i, name_i, type_i)
+    # Continue onto following pages while they keep yielding rows on the same columns —
+    # MCU pin tables routinely span several pages, re-printing the header each page.
+    for nxt in range(pg + 1, min(pg + 8, len(pages)) + 1):
+        nl = pages[nxt - 1].splitlines()
+        nh = next((i for i, ln in enumerate(nl) if _NAME_HDR.search(ln) and len(ln) < 220), None)
+        body = nl[nh + 1:] if nh is not None else nl
+        more = _parse_table_page(body, anchors, num_i, name_i, type_i)
+        if not more:
+            break
+        pins += more
+    # Dedup by pin number (first wins) — repeated headers / overlaps can double-count.
+    seen, uniq = set(), []
+    for p in pins:
+        if p["number"] not in seen:
+            seen.add(p["number"]); uniq.append(p)
+    pins = uniq
+    warn: list[str] = []
+    if ambig and not package:
+        warn.append(f"multiple package columns {ambig}; used '{lab}'. Re-run with "
+                    f"--package <pkg> to pick another.")
+    bga = any(re.match(r"^[A-Pa-p]{1,2}\d", p["number"]) for p in pins)
+    if bga:
+        warn.append("ball-grid (BGA) numbering — text grids parse poorly; verify every ball "
+                    "against the pinout figure.")
+    # Confidence: 'medium' only for a clean simple-numbered table; anything fishy → 'low'.
+    conf = "medium" if (len(pins) >= 2 and not bga and not ambig) else "low"
+    warn.append("DRAFT — verify against the rendered pinout figure before scaffolding.")
+    return {"pins": pins, "package": (package or lab), "source_page": pg,
+            "packages_available": pkgs_here, "confidence": conf, "warnings": warn}
 
 
 # ── fetch: resolve a datasheet URL and download it (stdlib urllib, via the proxy) ─
@@ -929,6 +1221,80 @@ def _cmd_figures(args) -> int:
     return 0
 
 
+def _match_manifest(part: str, entries):
+    q = _norm(part)
+    exact = [(d, m) for d, m in entries if _norm(Path(m.get("pdf", "")).stem) == q]
+    if exact:
+        return exact[0]
+    subs = [(d, m) for d, m in entries
+            if q in _norm(m.get("mpn", "") + Path(m.get("pdf", "")).stem)]
+    return subs[0] if subs else None
+
+
+def _cmd_pins(args) -> int:
+    """Extract a scaffold-ready DRAFT pin table from an ingested datasheet."""
+    root = _root(args)
+    got = _match_manifest(args.part, _index_entries(root))
+    if not got:
+        print(f"no ingested datasheet matches '{args.part}' — run `kb datasheet ingest --all`")
+        return 1
+    idir, man = got
+    pages = _cached_or_live_pages(root, root / man["pdf"])
+    pinout = man.get("sections", {}).get("pinout", [])
+    r = extract_pin_table(pages, pinout, args.package)
+    if args.json:
+        spec = {"meta": {"name": man.get("mpn") or Path(man["pdf"]).stem,
+                         "datasheet": man.get("source_url") or man.get("pdf"),
+                         "package": r["package"]},
+                "pins": r["pins"]}
+        print(json.dumps(spec, indent=2, ensure_ascii=False))
+        return 0 if r["pins"] else 1
+    avail = r.get("packages_available") or man.get("packages", [])
+    print(f"{man.get('pdf')} — pin table draft "
+          f"[{r['confidence']}]" + (f" · package {r['package']}" if r['package'] else ""))
+    if avail and len(avail) > 1 and not args.package:
+        print(f"  packages: {', '.join(avail)}  (pick one with --package)")
+    if r["pins"]:
+        for p in r["pins"]:
+            print(f"  {p['number']:>4}  {p['name']:<16} {p['etype']}")
+        print(f"  ({len(r['pins'])} pins)")
+    for w in r["warnings"]:
+        print(f"  ! {w}")
+    # Point at the rendered pinout figure so the human can verify the draft.
+    fig = next((f for f in man.get("figures", []) if f.get("kind") == "pinout"
+                and (not args.package or _norm(args.package) in _norm(f.get("package", "")))), None)
+    if fig and (idir / fig["path"]).exists():
+        print(f"  → verify against pinout figure: {idir / fig['path']}")
+    print("  → emit scaffold JSON with --json (pipe to `kp scaffold`).")
+    return 0
+
+
+def _cmd_parts(args) -> int:
+    """List BOM/work-list parts joined to ingested datasheets (coverage view)."""
+    cfg = cfgmod.load_or_exit(getattr(args, "config", None))
+    ov = parts_overview(cfg)
+    if args.json:
+        print(json.dumps(ov, indent=2, ensure_ascii=False))
+        return 0
+    c = ov["coverage"]
+    print(f"parts: {c['total']}  ·  with datasheet: {c['with_ds']}  ·  "
+          f"missing: {len(c['missing'])}")
+    for p in ov["parts"]:
+        ds = p["datasheet"]
+        if ds:
+            pk = ",".join(ds.get("packages", [])[:4])
+            print(f"  ✓ {p['part']:<22} {ds['pdf']}"
+                  + (f"  [{pk}]" if pk else ""))
+        else:
+            print(f"  ✗ {p['part']:<22} (no datasheet"
+                  + (f" · BOM url known" if p['url'] else "")
+                  + f" · source={p['source']})")
+    if c["missing"]:
+        print(f"\n{len(c['missing'])} without a local datasheet — "
+              f"`kb datasheet fetch <part>` (or --all).")
+    return 0
+
+
 def add_parser(sub) -> None:
     p = sub.add_parser(
         "datasheet",
@@ -1002,5 +1368,22 @@ def add_parser(sub) -> None:
     pg.add_argument("--package", help="with pinout: only the figure for this package")
     pg.add_argument("--config", help=f"path to {cfgmod.CONFIG_NAME}")
     pg.set_defaults(func=_cmd_figures)
+
+    pp = acts.add_parser(
+        "pins",
+        help="extract a DRAFT scaffold pin table from an ingested datasheet (verify vs figure)")
+    pp.add_argument("part", help="part name / LCSC# substring")
+    pp.add_argument("--package", help="pick a package column for a multi-package table, e.g. SO-8")
+    pp.add_argument("--json", action="store_true",
+                    help="emit {meta,pins} scaffold JSON (pipe to `kp scaffold`)")
+    pp.add_argument("--config", help=f"path to {cfgmod.CONFIG_NAME}")
+    pp.set_defaults(func=_cmd_pins)
+
+    pr = acts.add_parser(
+        "parts",
+        help="list BOM/work-list parts joined to ingested datasheets (coverage)")
+    pr.add_argument("--json", action="store_true", help="emit the full overview as JSON")
+    pr.add_argument("--config", help=f"path to {cfgmod.CONFIG_NAME}")
+    pr.set_defaults(func=_cmd_parts)
 
     p.set_defaults(func=lambda a: (p.print_help() or 0))
