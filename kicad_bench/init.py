@@ -197,30 +197,28 @@ def _write(path: Path, content: str, force: bool, made: list, skipped: list) -> 
     made.append(path)
 
 
-# ── run ──────────────────────────────────────────────────────────────────────
-def run(args) -> int:
-    repo = Path(args.repo).expanduser().resolve()
+# ── adopt an existing KiCad project (callable core) ──────────────────────────
+def init_board(repo, *, name: str | None = None, config_dir: str | None = None,
+               in_repo: bool = True, force: bool = False) -> dict:
+    """Adopt an EXISTING KiCad project: write its `kicad-bench.toml` (+ a pointer when the
+    config lives out-of-repo) and the sidecar/stage daemon units. NO KiCad files are
+    generated — discovery only inspects what's already there. Returns
+    {config_path, name, repo, discovered, made, skipped, install_hint}. Raises ValueError
+    if `repo` isn't a directory or has no `.kicad_pro`. This is the programmatic entry the
+    cockpit's Add-board calls; the `run()` CLI wraps it with console output + validation."""
+    repo = Path(repo).expanduser().resolve()
     if not repo.is_dir():
-        print(f"error: not a directory: {repo}", file=sys.stderr)
-        return 2
-
-    name = _slug(args.name or repo.name)
+        raise ValueError(f"not a directory: {repo}")
+    name = _slug(name or repo.name)
     d = _discover(repo)
     if not d.get("pro"):
-        print(f"error: no .kicad_pro found under {repo} — is this a KiCad project?",
-              file=sys.stderr)
-        return 2
-
-    print(f"== kb init: {name} ==")
-    print(f"  repo:          {repo}")
-    for k in ("pro", "root_sch", "pcb", "fp_lib_table", "bom"):
-        print(f"  {k:<13} {d.get(k) or '— (not found)'}")
+        raise ValueError(f"no .kicad_pro found under {repo} — is this a KiCad project?")
 
     # Where the config goes.
-    if args.in_repo:
+    if in_repo:
         cfg_path = repo / cfgmod.CONFIG_NAME
     else:
-        cfg_dir = Path(args.config_dir).expanduser().resolve() if args.config_dir \
+        cfg_dir = Path(config_dir).expanduser().resolve() if config_dir \
             else Path(__file__).resolve().parent.parent / "configs"
         cfg_path = cfg_dir / f"{name}.toml"
 
@@ -228,13 +226,13 @@ def run(args) -> int:
     made: list[Path] = []
     skipped: list[Path] = []
 
-    _write(cfg_path, _toml(name, repo, d, args.in_repo), args.force, made, skipped)
+    _write(cfg_path, _toml(name, repo, d, in_repo), force, made, skipped)
 
     # Pointer (only needed when the config lives outside the repo).
-    if not args.in_repo:
+    if not in_repo:
         _write(repo / cfgmod.POINTER_NAME,
                f"# kicad-bench config location for this repo (see `kb init`).\n{cfg_path}\n",
-               args.force, made, skipped)
+               force, made, skipped)
 
     # Daemon units — sidecar (live dashboard) + stage (lock-aware queue).
     cfgs = str(cfg_path)
@@ -244,12 +242,12 @@ def run(args) -> int:
                _launchd_plist(f"com.kicadbench.{name}.sidecar",
                               [kb, "sidecar", "--config", cfgs, "--host", "0.0.0.0",
                                "--port", "8765"], repo, f"/tmp/kicadbench-{name}-sidecar.log"),
-               args.force, made, skipped)
+               force, made, skipped)
         _write(units / f"com.kicadbench.{name}.stage.plist",
                _launchd_plist(f"com.kicadbench.{name}.stage",
                               [kb, "stage", "daemon", "--config", cfgs], repo,
                               f"/tmp/kicadbench-{name}-stage.log"),
-               args.force, made, skipped)
+               force, made, skipped)
         install_hint = (f"  launchctl load -w {units}/com.kicadbench.{name}.sidecar.plist\n"
                         f"  launchctl load -w {units}/com.kicadbench.{name}.stage.plist")
     else:
@@ -258,17 +256,35 @@ def run(args) -> int:
                _systemd_unit(f"kicad-bench sidecar ({name})",
                              [kb, "sidecar", "--config", cfgs, "--host", "0.0.0.0",
                               "--port", "8765"], repo),
-               args.force, made, skipped)
+               force, made, skipped)
         _write(units / f"kicadbench-{name}-stage.service",
                _systemd_unit(f"kicad-bench stage daemon ({name})",
                              [kb, "stage", "daemon", "--config", cfgs], repo),
-               args.force, made, skipped)
+               force, made, skipped)
         install_hint = (f"  systemctl --user enable --now "
                         f"{units.name}/kicadbench-{name}-sidecar.service  # (after `cp` to ~/.config/systemd/user/)")
 
-    for p in made:
+    return {"config_path": cfg_path, "name": name, "repo": repo, "discovered": d,
+            "made": made, "skipped": skipped, "install_hint": install_hint}
+
+
+# ── run (CLI wrapper: console output + validation) ───────────────────────────
+def run(args) -> int:
+    try:
+        r = init_board(args.repo, name=args.name, config_dir=args.config_dir,
+                       in_repo=args.in_repo, force=args.force)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
+    name, repo, d, cfg_path = r["name"], r["repo"], r["discovered"], r["config_path"]
+    print(f"== kb init: {name} ==")
+    print(f"  repo:          {repo}")
+    for k in ("pro", "root_sch", "pcb", "fp_lib_table", "bom"):
+        print(f"  {k:<13} {d.get(k) or '— (not found)'}")
+    for p in r["made"]:
         print(f"  + wrote {p}")
-    for p in skipped:
+    for p in r["skipped"]:
         print(f"  · exists, kept (use --force): {p}")
 
     # Validate.
@@ -292,5 +308,5 @@ def run(args) -> int:
     print(f"  kb audit            # from inside {repo} (config auto-resolves via the pointer)")
     print(f"  kb sidecar          # live dashboard on http://127.0.0.1:8765")
     print("  # fill in [contracts]/[fab] in the toml, then install the daemon units:")
-    print(install_hint)
+    print(r["install_hint"])
     return 0
