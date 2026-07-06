@@ -85,6 +85,39 @@ def references(sch: str | Path) -> list[str]:
     return [ref for ref in _REFERENCE.findall(text) if _DESIGNATOR.match(ref)]
 
 
+_PROPERTY = re.compile(r'\(property\s+"([^"]+)"\s+"([^"]*)"')
+_SYMBOL_SPLIT = re.compile(r'\n\s*\(symbol\b')
+
+
+def components(sch: str | Path,
+               mpn_keys: tuple[str, ...] = ("MPN", "Manufacturer Part Number")) -> list[dict]:
+    """Instance components as dicts ``{reference, value, mpn}``.
+
+    One entry per real instance symbol — a symbol whose Reference is a true designator
+    (letters+digits). The `lib_symbols` templates ("C", "R", …) and power/virtual
+    `#`-prefixed symbols are dropped, same as `references()`. `mpn` is the first
+    non-empty value among `mpn_keys` (KiCad's `Datasheet`/`Footprint` etc. are ignored).
+
+    Read-only text parse — needs no kicad-cli.
+    """
+    text = Path(sch).read_text()
+    out: list[dict] = []
+    for block in _SYMBOL_SPLIT.split(text)[1:]:
+        props: dict[str, str] = {}
+        for key, val in _PROPERTY.findall(block):
+            props.setdefault(key, val)          # first (the instance's own) wins
+        ref = props.get("Reference", "")
+        if not _DESIGNATOR.match(ref):
+            continue
+        mpn = ""
+        for key in mpn_keys:
+            if props.get(key, "").strip():
+                mpn = props[key].strip()
+                break
+        out.append({"reference": ref, "value": props.get("Value", "").strip(), "mpn": mpn})
+    return out
+
+
 def parse_fp_lib_table(table: Path, kiprjmod: Path) -> dict[str, Path]:
     """nickname -> .pretty dir, expanding ${KIPRJMOD}."""
     libs: dict[str, Path] = {}

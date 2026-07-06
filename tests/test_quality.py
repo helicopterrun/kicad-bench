@@ -2,7 +2,9 @@
 from pathlib import Path
 
 from kicad_bench.core.config import AllowRule
-from kicad_bench.quality import erc_triage, netlist_audit, symbol_style, sch_readability
+from kicad_bench.core import schparse
+from kicad_bench.quality import (approved_parts, erc_triage, netlist_audit,
+                                 symbol_style, sch_readability)
 from kicad_bench.layout import netclass_coverage as ncc
 
 
@@ -261,3 +263,111 @@ def test_netclass_sync_build():
     assert pwr["track_width"] == 0.5 and pwr["clearance"] == 0.2 and pwr["via_drill"] == 0.3
     lvds = next(c for c in classes if c["name"] == "LVDS")
     assert lvds["diff_pair_gap"] == 0.2 and lvds["diff_pair_width"] == 0.11
+
+
+# -- approved-parts (MPN allow-list governance) --------------------------
+_APPROVED_CSV = """mpn,manufacturer,alt_mpn_1,alt_mpn_2,notes
+# --- passives ---
+CL10B104KB8NNNC,Samsung,GRM188R71H104KA93D,,decoupling
+AP2112K-3.3TRG1,Diodes,AP2112K-3.3,,ldo
+"""
+
+_SCH = """(kicad_sch
+  (lib_symbols
+    (symbol "Device:C" (property "Reference" "C" (at 0 0 0))
+      (symbol "C_0_1" (rectangle (start -1 -1) (end 1 1)))))
+  (symbol (lib_id "Device:C") (at 10 10 0)
+    (property "Reference" "C1" (at 10 8 0))
+    (property "Value" "100nF" (at 10 12 0))
+    (property "MPN" "CL10B104KB8NNNC" (at 10 14 0)))
+  (symbol (lib_id "Regulator:AP2112K") (at 20 10 0)
+    (property "Reference" "U1" (at 20 8 0))
+    (property "Value" "AP2112K-3.3" (at 20 12 0))
+    (property "MPN" "GRM188R71H104KA93D" (at 20 14 0)))
+  (symbol (lib_id "Device:R") (at 30 10 0)
+    (property "Reference" "R1" (at 30 8 0))
+    (property "Value" "10k" (at 30 12 0))
+    (property "MPN" "RC0603-NOPE" (at 30 14 0)))
+  (symbol (lib_id "Device:R") (at 40 10 0)
+    (property "Reference" "R2" (at 40 8 0))
+    (property "Value" "4k7" (at 40 12 0)))
+  (symbol (lib_id "power:GND") (at 50 10 0)
+    (property "Reference" "#PWR01" (at 50 8 0)))
+  (symbol (lib_id "Mechanical:MountingHole") (at 60 10 0)
+    (property "Reference" "H1" (at 60 8 0)))
+)
+"""
+
+
+def test_schparse_components(tmp_path):
+    f = tmp_path / "x.kicad_sch"
+    f.write_text(_SCH)
+    comps = schparse.components(f)
+    by_ref = {c["reference"]: c for c in comps}
+    # lib_symbols template "C" and #PWR01 dropped; real designators kept (incl H1)
+    assert set(by_ref) == {"C1", "U1", "R1", "R2", "H1"}
+    assert by_ref["C1"]["mpn"] == "CL10B104KB8NNNC"
+    assert by_ref["C1"]["value"] == "100nF"
+    assert by_ref["R2"]["mpn"] == ""            # no MPN property
+
+
+def test_load_approved_includes_alternates(tmp_path):
+    csvf = tmp_path / "approved_parts.csv"
+    csvf.write_text(_APPROVED_CSV)
+    approved = approved_parts.load_approved(csvf)
+    assert "CL10B104KB8NNNC" in approved          # primary
+    assert "GRM188R71H104KA93D" in approved        # alt_mpn_1
+    assert "AP2112K-3.3" in approved               # alt_mpn_1 of the LDO
+
+
+def test_approved_parts_gate(tmp_path):
+    f = tmp_path / "x.kicad_sch"
+    f.write_text(_SCH)
+    csvf = tmp_path / "approved_parts.csv"
+    csvf.write_text(_APPROVED_CSV)
+    comps = schparse.components(f)
+    approved = approved_parts.load_approved(csvf)
+
+    # default policy: missing MPN -> error, unapproved -> warn
+    res = approved_parts.check(comps, approved, allow_missing=False, unapproved="warn")
+    by_ref = {f_.where: f_ for f_ in res.findings}
+    assert by_ref["R2"].severity == "error"        # no MPN
+    assert by_ref["R1"].severity == "warn"         # RC0603-NOPE not approved
+    assert "C1" not in by_ref and "U1" not in by_ref  # both approved -> no finding
+    assert "H1" not in by_ref                       # mounting hole skipped
+    assert res.n_errors == 1
+    assert not res.passed
+
+
+def test_approved_parts_policy_knobs(tmp_path):
+    f = tmp_path / "x.kicad_sch"
+    f.write_text(_SCH)
+    csvf = tmp_path / "approved_parts.csv"
+    csvf.write_text(_APPROVED_CSV)
+    comps = schparse.components(f)
+    approved = approved_parts.load_approved(csvf)
+
+    # allow_missing=True downgrades the missing-MPN error to a warning...
+    # ...and unapproved="error" promotes the unlisted MPN to an error.
+    res = approved_parts.check(comps, approved, allow_missing=True, unapproved="error")
+    by_ref = {f_.where: f_ for f_ in res.findings}
+    assert by_ref["R2"].severity == "warn"         # missing now tolerated
+    assert by_ref["R1"].severity == "error"        # unapproved now hard-fails
+    assert res.n_errors == 1
+
+
+def test_approved_parts_all_clean(tmp_path):
+    # a schematic whose parts are all approved -> passes with a single ok finding
+    sch = tmp_path / "ok.kicad_sch"
+    sch.write_text('(kicad_sch\n'
+                   '  (symbol (lib_id "Device:C") (at 0 0 0)\n'
+                   '    (property "Reference" "C1" (at 0 0 0))\n'
+                   '    (property "Value" "100nF" (at 0 0 0))\n'
+                   '    (property "MPN" "CL10B104KB8NNNC" (at 0 0 0))))\n')
+    csvf = tmp_path / "approved_parts.csv"
+    csvf.write_text(_APPROVED_CSV)
+    res = approved_parts.check(schparse.components(sch),
+                               approved_parts.load_approved(csvf),
+                               allow_missing=False, unapproved="error")
+    assert res.passed and res.n_errors == 0
+    assert any(f_.severity == "ok" for f_ in res.findings)
