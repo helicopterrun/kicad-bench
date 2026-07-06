@@ -9,7 +9,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from . import __version__, audit, datasheet, sch_live, sidecar, stage
+from . import __version__, audit, datasheet, sch_live, scaffold, sidecar, stage
 from . import init as init_cmd
 from .core import cli
 from .quality import (approved_parts, block_review, commit_gate, erc_triage,
@@ -19,6 +19,7 @@ from .layout import (dfm_preflight, diffpair_audit, dru_guard, dru_lint,
                      route_coverage, stackup_sync, track_conformance)
 
 _TOOLS = [
+    scaffold,                                                    # Priority 0: scaffold a new product monorepo
     init_cmd,                                                    # one-command bring-up for a new board
     audit, sidecar, stage, datasheet,                            # consolidated audit + live web sidecar + lock-aware queue + datasheet viewer
     sch_live,                                                    # live schematic summary over the IPC API (shells to kb-ipc add-on)
