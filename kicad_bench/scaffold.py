@@ -242,6 +242,28 @@ def scaffold_product(parent: Path, product: str, boards: list[str]) -> Path:
     return root
 
 
+def scaffold_product_full(parent: Path, product: str, boards: list[str], *,
+                          template: str | None = None,
+                          templates_dir: str | None = None,
+                          validate: bool = True) -> tuple[Path, list[dict]]:
+    """Scaffold the product tree, then (if `template` given) instantiate a real KiCad
+    project into each `hardware/<board>/` from the kicad-templates repo.
+
+    Returns (product_root, per_board_instantiation_results). With `template=None` this
+    is exactly `scaffold_product` — the tree only, no design files. Shared by the `kb
+    scaffold` CLI and the cockpit "New Product" endpoint so both behave identically.
+    """
+    root = scaffold_product(parent, product, boards)
+    results: list[dict] = []
+    if template:
+        from . import template as tmpl
+        tdir = tmpl.resolve_template(template, tmpl.templates_root(templates_dir))
+        for b in boards:
+            results.append(tmpl.instantiate_template(
+                tdir, root / "hardware" / b, b, validate=validate))
+    return root, results
+
+
 def _git_init(root: Path) -> str:
     """Init a git repo and make the initial commit if a user identity is configured.
     Returns a short status line. Never fatal — scaffolding already succeeded."""
@@ -276,21 +298,37 @@ def run(args) -> int:
     if not parent.is_dir():
         sys.exit(f"error: parent dir does not exist: {parent}")
 
+    template = getattr(args, "template", None)
+    templates_dir = getattr(args, "templates_dir", None)
     try:
-        root = scaffold_product(parent, args.product, boards)
+        root, results = scaffold_product_full(
+            parent, args.product, boards, template=template, templates_dir=templates_dir)
     except FileExistsError as e:
         sys.exit(f"error: {e} already exists")
+    except ValueError as e:                       # bad/unknown template
+        sys.exit(f"error: {e}")
 
     git_line = "· git init skipped (--no-git)" if args.no_git else _git_init(root)
 
     print(f"✓ created {root}")
     print(f"  boards: {', '.join(boards)}")
+    for r in results:
+        val = {True: "validated", False: "VALIDATION WARNINGS", None: "not validated"}[r["validated"]]
+        print(f"  ↳ {r['board']}: instantiated from {r['template']} "
+              f"({len(r['footprint_libs'])} fp libs, {val})")
+        for w in r["warnings"]:
+            print(f"      ⚠ {w}")
     print(f"  {git_line}")
     print("\nNext steps:")
     print(f"  cd {root}")
-    print("  # In KiCad: File ▸ New Project, save each board as:")
-    for b in boards:
-        print(f"  #   hardware/{b}/{b}.kicad_pro")
+    if template:
+        print("  # Each board now has a starter KiCad project — open it to design:")
+        for b in boards:
+            print(f"  #   hardware/{b}/{b}.kicad_pro")
+    else:
+        print("  # In KiCad: File ▸ New Project, save each board as:")
+        for b in boards:
+            print(f"  #   hardware/{b}/{b}.kicad_pro")
     print("  # then:  kb audit   (and  kb approved-parts)")
     return 0
 
@@ -304,5 +342,10 @@ def add_parser(sub) -> None:
                    help="board names (default: main-board)")
     p.add_argument("-d", "--dir", default=".",
                    help="parent directory to create the product in (default: cwd)")
+    p.add_argument("-t", "--template",
+                   help="instantiate a real KiCad project per board from the "
+                        "kicad-templates repo (e.g. 2L_OSHpark_Template); omit for tree-only")
+    p.add_argument("--templates-dir",
+                   help="templates repo root (default: $KICAD_TEMPLATES_DIR or ~/kicad-templates)")
     p.add_argument("--no-git", action="store_true", help="skip git init/commit")
     p.set_defaults(func=run)
