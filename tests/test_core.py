@@ -69,6 +69,128 @@ video = ["R40-R41"]
     assert cfg.block_for_designator("R99") is None
 
 
+# -- product / multi-board config ---------------------------------------
+def test_single_board_backward_compat(tmp_path):
+    """A pre-multi-board config loads unchanged: top-level fields resolve as before,
+    and one implicit board mirrors them."""
+    cfgfile = write(tmp_path, "kicad-bench.toml", """
+[project]
+root_sch = "Proj/Proj.kicad_sch"
+pcb      = "Proj/Proj.kicad_pcb"
+[contracts]
+nets = ["VIN_12V", "GND"]
+[fab]
+config  = "dr.json"
+stackup = "JLC04161H-7628"
+""")
+    cfg = cfgmod.load(cfgfile)
+    assert cfg.root_sch == tmp_path / "Proj/Proj.kicad_sch"
+    assert cfg.pcb == tmp_path / "Proj/Proj.kicad_pcb"
+    assert cfg.nets == {"VIN_12V", "GND"}
+    assert cfg.fab_config == tmp_path / "dr.json"
+    assert cfg.stackup == "JLC04161H-7628"
+    # exactly one implicit board mirroring the top-level fields
+    assert len(cfg.boards) == 1
+    assert cfg.active_board == "main"
+    assert cfg.boards[0].root_sch == cfg.root_sch
+    assert cfg.boards[0].stackup == cfg.stackup
+    assert cfg.product is None
+
+
+def test_multi_board_parse_and_active(tmp_path):
+    cfgfile = write(tmp_path, "kicad-bench.toml", """
+[product]
+name = "wildlife-cam"
+firmware = "firmware"
+
+[[boards]]
+name     = "main-board"
+root_sch = "hardware/main-board/main-board.kicad_sch"
+pcb      = "hardware/main-board/main-board.kicad_pcb"
+
+[[boards]]
+name     = "sensor-board"
+root_sch = "hardware/sensor-board/sensor-board.kicad_sch"
+pcb      = "hardware/sensor-board/sensor-board.kicad_pcb"
+""")
+    cfg = cfgmod.load(cfgfile)
+    assert [b.name for b in cfg.boards] == ["main-board", "sensor-board"]
+    assert cfg.product is not None
+    assert cfg.product.name == "wildlife-cam"
+    assert cfg.product.firmware == tmp_path / "firmware"
+    assert cfg.product.releases == tmp_path / "releases"   # defaulted
+    # top-level fields mirror the first board
+    assert cfg.active_board == "main-board"
+    assert cfg.root_sch == tmp_path / "hardware/main-board/main-board.kicad_sch"
+
+
+def test_per_board_fab_fallback_and_override(tmp_path):
+    cfgfile = write(tmp_path, "kicad-bench.toml", """
+[fab]
+config  = "shared_dr.json"
+stackup = "PRODUCT-DEFAULT"
+
+[[boards]]
+name = "inherits"
+pcb  = "a.kicad_pcb"
+
+[[boards]]
+name = "overrides"
+pcb  = "b.kicad_pcb"
+[boards.fab]
+stackup = "BOARD-SPECIAL"
+""")
+    cfg = cfgmod.load(cfgfile)
+    inh, ovr = cfg.board("inherits"), cfg.board("overrides")
+    # inherits product-level fab
+    assert inh.stackup == "PRODUCT-DEFAULT"
+    assert inh.fab_config == tmp_path / "shared_dr.json"
+    # overrides stackup but still inherits the product-level config path
+    assert ovr.stackup == "BOARD-SPECIAL"
+    assert ovr.fab_config == tmp_path / "shared_dr.json"
+
+
+def test_activate_switches_board_and_rejects_unknown(tmp_path):
+    cfgfile = write(tmp_path, "kicad-bench.toml", """
+[[boards]]
+name = "a"
+pcb  = "a.kicad_pcb"
+[[boards]]
+name = "b"
+pcb  = "b.kicad_pcb"
+""")
+    cfg = cfgmod.load(cfgfile)
+    assert cfg.pcb == tmp_path / "a.kicad_pcb"
+    cfg.activate("b")
+    assert cfg.active_board == "b"
+    assert cfg.pcb == tmp_path / "b.kicad_pcb"
+    with pytest.raises(SystemExit):
+        cfg.activate("nope")
+
+
+def test_approved_parts_parsed(tmp_path):
+    cfgfile = write(tmp_path, "kicad-bench.toml", """
+[approved_parts]
+csv = "approved_parts.csv"
+allow_missing_mpn = true
+unapproved = "error"
+""")
+    cfg = cfgmod.load(cfgfile)
+    assert cfg.approved_parts is not None
+    assert cfg.approved_parts.csv == tmp_path / "approved_parts.csv"
+    assert cfg.approved_parts.allow_missing_mpn is True
+    assert cfg.approved_parts.unapproved == "error"
+
+
+def test_approved_parts_absent(tmp_path):
+    cfgfile = write(tmp_path, "kicad-bench.toml", """
+[project]
+pcb = "x.kicad_pcb"
+""")
+    cfg = cfgmod.load(cfgfile)
+    assert cfg.approved_parts is None
+
+
 # -- kicad10 patch -------------------------------------------------------
 def test_kicad10_patch():
     src = '(kicad_sch (version 20250114) (generator_version "9.0") (paper "A3")'
