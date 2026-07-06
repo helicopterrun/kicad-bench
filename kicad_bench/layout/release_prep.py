@@ -15,7 +15,6 @@ Exit 0 if releasable (or exported), 1 if not ready, 2 on setup error.
 """
 from __future__ import annotations
 
-import subprocess
 import sys
 from pathlib import Path
 
@@ -86,23 +85,14 @@ def readiness(cfg: cfgmod.Config) -> tuple[bool, Result, bool]:
 
 
 def _export(cfg: cfgmod.Config) -> int:
+    # The BASIC gerber/drill/pos set into the gitignored output/release/. A full frozen
+    # release (STEP + PDFs into releases/<version>/) is `kb release-freeze`; both share
+    # the one KicadCliBackend so there is a single fab-export implementation.
+    from .. import fab
     out = cfg.root / "output" / "release"
-    out.mkdir(parents=True, exist_ok=True)
-    pcb = str(cfg.pcb)
-    jobs = [
-        (["kicad-cli", "pcb", "export", "gerbers", "--output", str(out), pcb], "gerbers"),
-        (["kicad-cli", "pcb", "export", "drill", "--output", str(out) + "/", pcb], "drill"),
-        (["kicad-cli", "pcb", "export", "pos", "--output", str(out / 'positions.csv'),
-          "--format", "csv", pcb], "position file"),
-    ]
-    for cmd, label in jobs:
-        r = subprocess.run(cmd, capture_output=True, text=True)
-        if r.returncode != 0:
-            print(style.red(f"  ✗ {label} export failed: {r.stderr.strip()}"))
-            return 1
-        print(style.green(f"  ✓ {label}"))
-    print(style.dim(f"  release artifacts in {out}"))
-    return 0
+    res = fab.KicadCliBackend().export(cfg, out, artifacts=fab.BASIC)
+    print(res.render())
+    return 0 if res.passed else 1
 
 
 def run(args) -> int:
