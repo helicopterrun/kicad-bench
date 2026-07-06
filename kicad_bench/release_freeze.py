@@ -93,7 +93,9 @@ def run(args) -> int:
     root = cfg.product.root if cfg.product else cfg.root
 
     # git preconditions (skipped when not a repo, or with --allow-dirty).
-    if _is_git_repo(root):
+    # Git preconditions only matter when we're going to commit + tag. With --no-git
+    # (e.g. CI exporting artifacts for an already-pushed tag) they're skipped.
+    if _is_git_repo(root) and not args.no_git and not args.dry_run:
         if _tag_exists(root, args.version):
             sys.exit(f"error: tag {args.version} already exists")
         if not args.allow_dirty and not _tree_clean(root):
@@ -160,6 +162,7 @@ def add_parser(sub) -> None:
     p.add_argument("--allow-dirty", action="store_true",
                    help="skip the clean-working-tree check")
     p.add_argument("--no-git", action="store_true",
-                   help="export the fab package but skip the commit + tag")
+                   help="export only — skip the clean-tree/tag preconditions and the "
+                        "commit + tag (CI uses this to build artifacts for an existing tag)")
     p.add_argument("--config", help=f"path to {cfgmod.CONFIG_NAME}")
     p.set_defaults(func=run)

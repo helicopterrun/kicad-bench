@@ -172,7 +172,7 @@ def sections_to_dict(sections: list[tuple[str, Result]], cfg: cfgmod.Config) -> 
 
 
 def run(args) -> int:
-    cfg = cfgmod.load_or_exit(args.config)
+    cfg = cfgmod.load_or_exit(args.config, getattr(args, "board", None))
     sections = run_all(cfg)
     print(render(sections, args.full))
     return 1 if any(r.n_errors for _, r in sections) else 0
@@ -181,5 +181,6 @@ def run(args) -> int:
 def add_parser(sub):
     p = sub.add_parser("audit", help="consolidated whole-repo audit (all read-only checks)")
     p.add_argument("--full", action="store_true", help="print every error/warn finding, not just the roster")
+    p.add_argument("--board", help="which board to audit (multi-board configs; default: first)")
     p.add_argument("--config", help=f"path to {cfgmod.CONFIG_NAME}")
     p.set_defaults(func=run)

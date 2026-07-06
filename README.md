@@ -513,8 +513,10 @@ read-first.
 
 ## Skills
 
-`skills/kicad-quality-gate` and `skills/kicad-layout-prep` are thin SKILL.md
-wrappers so Claude can drive the `kb` tools with the same guardrails.
+`skills/kicad-quality-gate`, `skills/kicad-layout-prep`, and
+`skills/kicad-product-workflow` are thin SKILL.md wrappers so Claude can drive the
+`kb` tools with the same guardrails (quality gates, layout prep, and the
+scaffold→gate→freeze product lifecycle).
 
 ## Roadmap — product lifecycle
 

@@ -154,6 +154,24 @@ def test_run_freezes_all_boards_commits_and_tags(tmp_path, monkeypatch):
     assert "Freeze release v1.0" in _git(root, "log", "-1", "--pretty=%s").stdout
 
 
+def test_run_no_git_exports_despite_existing_tag(tmp_path, monkeypatch):
+    # CI case: the tag already exists (it triggered the run); --no-git skips the
+    # tag/clean preconditions and the commit/tag, but still gates + exports.
+    root, cfg = make_repo(tmp_path, ["b1"])
+    _git(root, "tag", "v1.0")
+    (root / "README.md").write_text("dirty too")        # also dirty — must be ignored
+    monkeypatch.setattr(release_prep, "readiness", _ready)
+    backend = FakeBackend()
+    monkeypatch.setattr(fab, "get_backend", lambda name: backend)
+    monkeypatch.setattr(cfgmod, "load_or_exit", lambda *a, **k: cfg)
+
+    rc = release_freeze.run(_args("v1.0", no_git=True))
+    assert rc == 0
+    assert (root / "releases/v1.0/b1/gerbers.zip").is_file()
+    # no NEW commit was made (still the single init commit)
+    assert _git(root, "log", "-1", "--pretty=%s").stdout.strip() == "init"
+
+
 def test_run_dry_run_writes_nothing(tmp_path, monkeypatch):
     root, cfg = make_repo(tmp_path, ["b1"])
     monkeypatch.setattr(release_prep, "readiness", _ready)

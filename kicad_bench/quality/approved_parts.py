@@ -77,7 +77,7 @@ def check(components: list[dict], approved: set[str],
 
 
 def run(args) -> int:
-    cfg = cfgmod.load_or_exit(args.config)
+    cfg = cfgmod.load_or_exit(args.config, getattr(args, "board", None))
     ap = cfg.approved_parts
     if ap is None:
         sys.exit('error: no [approved_parts] in config — add e.g.\n'
@@ -102,5 +102,6 @@ def add_parser(sub):
                        help="MPN allow-list governance gate (schematic vs approved_parts.csv)")
     p.add_argument("schematic", nargs="?",
                    help="sheet to check (default: project.root_sch / active board)")
+    p.add_argument("--board", help="which board to check (multi-board configs; default: first)")
     p.add_argument("--config", help=f"path to {cfgmod.CONFIG_NAME}")
     p.set_defaults(func=run)

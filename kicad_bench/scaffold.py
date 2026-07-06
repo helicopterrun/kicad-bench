@@ -24,6 +24,9 @@ from pathlib import Path
 # Lowercase kebab-case, same rule as the original new-kicad-product.sh.
 _NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
 
+# Packaged templates (CI workflow, …) copied into scaffolded products.
+_TEMPLATES = Path(__file__).parent / "templates"
+
 
 def valid_name(name: str) -> bool:
     return bool(_NAME_RE.match(name))
@@ -228,6 +231,13 @@ def scaffold_product(parent: Path, product: str, boards: list[str]) -> Path:
     (root / "approved_parts.csv").write_text(_APPROVED_PARTS_CSV)
     for b in boards:
         (root / "hardware" / b / "README.md").write_text(_board_readme(b))
+
+    # CI: run the kb gates per board on push/PR, freeze on a v* tag.
+    ci = _TEMPLATES / "hardware-ci.yml"
+    if ci.exists():
+        wf = root / ".github" / "workflows"
+        wf.mkdir(parents=True, exist_ok=True)
+        (wf / "hardware-ci.yml").write_text(ci.read_text())
 
     return root
 

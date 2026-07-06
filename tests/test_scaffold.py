@@ -20,11 +20,13 @@ def test_scaffold_tree_and_seed_files(tmp_path):
     for d in ("hardware/main-board/lib", "hardware/main-board/output",
               "firmware", "mechanical", "releases", "tools", "docs/datasheets"):
         assert (root / d).is_dir()
-    # seed files
+    # seed files (incl. the emitted CI workflow)
     for f in ("README.md", "CHANGELOG.md", ".gitignore", "kicad-bench.toml",
               "approved_parts.csv", "docs/architecture.md", "docs/requirements.md",
-              "hardware/main-board/README.md"):
+              "hardware/main-board/README.md", ".github/workflows/hardware-ci.yml"):
         assert (root / f).is_file()
+    # CI drives the kb gates
+    assert "kb approved-parts" in (root / ".github/workflows/hardware-ci.yml").read_text()
     # compliance-aware requirements stub carried over from the old workflow
     assert "FCC Part 15" in (root / "docs/requirements.md").read_text()
     # per-board fab-notes template
