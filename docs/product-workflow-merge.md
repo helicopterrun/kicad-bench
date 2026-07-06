@@ -153,14 +153,17 @@ class FabBackend(Protocol):
 - **`KicadCliBackend`** (default, ships now) — the existing `_export` logic plus STEP
   (`kicad-cli pcb export step`) and schematic/board PDFs (`kicad-cli sch export pdf`,
   `kicad-cli pcb export pdf`). Zero new dependencies.
-- **`KibotBackend`** (documented, not built now) — detected on PATH like kicad-cli; when
-  present, produces the artifacts kicad-cli can't: interactive HTML BOM (ibom),
-  IPC-D-356 netlist, and a sourced BOM-xlsx. Selected via a future
-  `[fab] backend = "kibot"` or `--backend kibot`.
+- **`KibotBackend`** (implemented, opt-in) — detected on PATH like kicad-cli; runs the
+  product's `.kibot.yaml` (or a packaged starter, `kicad_bench/templates/kibot.yaml`) to
+  produce the artifacts kicad-cli can't: interactive HTML BOM (ibom), IPC-D-356 netlist,
+  and a sourced BOM-xlsx. Selected via `--backend kibot`; the config is resolved from
+  `[fab].kibot_config` → product-root `.kibot.yaml` → the packaged starter. Because
+  KiBot's outputs are defined by its config, the fine-grained `artifacts` set does not
+  apply to this backend — it runs the whole config.
 
 ### Artifact coverage
 
-| Artifact | KicadCliBackend (now) | KibotBackend (later) |
+| Artifact | KicadCliBackend (default) | KibotBackend (`--backend kibot`) |
 |---|---|---|
 | Gerber X2 (zip) | ✓ | ✓ |
 | Excellon drill (PTH/NPTH) | ✓ | ✓ |
@@ -168,11 +171,8 @@ class FabBackend(Protocol):
 | STEP 3D model | ✓ | ✓ |
 | Schematic + board PDFs | ✓ | ✓ |
 | Interactive HTML BOM (ibom) | — | ✓ |
-| IPC-D-356 netlist | — | ✓ |
+| IPC-D-356 netlist | — | ✓ (uncomment in the starter) |
 | Sourced BOM XLSX (MPN/stock/price) | — | ✓ |
-
-No KiBot code lands in this pass — only the seam and this coverage table, so the later
-addition is a drop-in.
 
 ## 5. Read/write boundary audit
 
@@ -219,22 +219,22 @@ archived.
 ## 7. Staged implementation roadmap
 
 Each phase is independently shippable and testable (kicad-bench's `tests/` are
-pure-logic pytest, no kicad-cli needed):
+pure-logic pytest, no kicad-cli needed). **All six are now implemented.**
 
-1. **Config foundation** — `[product]` / `[[boards]]` + `BoardConfig` + the implicit
+1. ✅ **Config foundation** — `[product]` / `[[boards]]` + `BoardConfig` + the implicit
    single-board shim + `[approved_parts]`. No behavior change for existing single-board
-   configs. Tests: implicit-board synthesis, multi-board parse, per-board fallback.
-2. **`kb approved-parts`** — the Priority-1 gate + config wiring. Tests: MPN extraction,
-   allow-list matching (incl. `alt_mpn_1/2`), missing/unapproved policy, ref-skip rules.
-3. **`kb scaffold`** — the Priority-0 command writing tree + docs + `.gitignore` +
-   config + pointer + CI. Tests: name validation, tree shape, generated config loads,
-   idempotence/refuse-overwrite.
-4. **`kb release-freeze`** — extend `release_prep` (per-board loop, clean-tree check,
-   `releases/<ver>/` write, tag) behind the `FabBackend` seam with `KicadCliBackend`.
-   Tests: gating reuse, per-board iteration, backend dispatch (mock kicad-cli).
-5. **CI templates + `skills/kicad-product-workflow/SKILL.md`** — the maturity-ladder CI
-   and the thin skill wrapper.
-6. **(Later) `KibotBackend`** — optional, PATH-detected, for ibom/IPC-356/BOM-xlsx.
+   configs.
+2. ✅ **`kb approved-parts`** — the Priority-1 gate + config wiring (MPN extraction,
+   `alt_mpn_1/2` matching, missing/unapproved policy, ref-skip rules).
+3. ✅ **`kb scaffold`** — the Priority-0 command writing tree + docs + `.gitignore` +
+   config + CI (config lives in-repo at the product root, so no pointer is needed).
+4. ✅ **`kb release-freeze`** — extends `release_prep` (per-board loop, clean-tree check,
+   `releases/<ver>/` write, commit + tag) behind the `FabBackend` seam with
+   `KicadCliBackend`.
+5. ✅ **CI template + `skills/kicad-product-workflow/SKILL.md`** — the kb-driven CI
+   (emitted by `kb scaffold`) and the thin skill wrapper; `--board` selector added.
+6. ✅ **`KibotBackend`** — optional, PATH-detected, for ibom/IPC-356/BOM-xlsx; runs the
+   product's `.kibot.yaml` (or a packaged starter). Selected with `--backend kibot`.
 
 ## Critical files (targets for the later passes)
 

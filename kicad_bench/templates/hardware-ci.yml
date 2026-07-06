@@ -1,0 +1,100 @@
+name: hardware-ci
+
+# CI for a kicad-bench product monorepo (emitted by `kb scaffold`).
+#   gate    — on every push/PR: `kb audit` + `kb approved-parts` per board
+#   release — on a v* tag: `kb release-freeze` exports the fab package, attached
+#             to a GitHub Release.  releases/<tag>/ is the frozen record; output/
+#             stays regeneratable — this split is the invariant CI enforces.
+#
+# `kb` is installed from the kicad-bench repo; pin KICAD_BENCH_PKG to a tag/sha for
+# reproducible builds. Boards are discovered from hardware/*/*.kicad_pro.
+
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - 'hardware/**'
+      - 'kicad-bench.toml'
+      - 'approved_parts.csv'
+      - '.github/workflows/hardware-ci.yml'
+    tags:
+      - 'v*'
+  pull_request:
+    paths:
+      - 'hardware/**'
+      - 'kicad-bench.toml'
+      - 'approved_parts.csv'
+
+permissions:
+  contents: write
+
+env:
+  # Pin to a tag or commit sha for reproducibility, e.g. ...@v0.2.0
+  KICAD_BENCH_PKG: "kicad-bench @ git+https://github.com/helicopterrun/kicad-bench@main"
+
+jobs:
+  # Discover every hardware/<board>/ that has a .kicad_pro → a matrix.
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      boards: ${{ steps.find.outputs.boards }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: find
+        run: |
+          boards=$(find hardware -maxdepth 2 -name '*.kicad_pro' \
+                   -exec dirname {} \; | sed 's|hardware/||' | \
+                   jq -R -s -c 'split("\n") | map(select(length > 0))')
+          echo "boards=$boards" >> "$GITHUB_OUTPUT"
+          echo "Discovered boards: $boards"
+
+  # Read-only gates on every push/PR. Fans out per board.
+  gate:
+    needs: discover
+    if: needs.discover.outputs.boards != '[]'
+    runs-on: ubuntu-latest
+    container:
+      image: kicad/kicad:9.0
+      options: --user root
+    strategy:
+      fail-fast: false
+      matrix:
+        board: ${{ fromJSON(needs.discover.outputs.boards) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install kb
+        run: pip install --break-system-packages "${KICAD_BENCH_PKG}"
+      - name: Audit (${{ matrix.board }})
+        run: kb audit --board "${{ matrix.board }}" --config kicad-bench.toml
+      - name: Approved parts (${{ matrix.board }})
+        run: kb approved-parts --board "${{ matrix.board }}" --config kicad-bench.toml
+
+  # On a v* tag: export the frozen fab package (the tag already exists → --no-git)
+  # and attach it to a GitHub Release.
+  release:
+    needs: [discover, gate]
+    if: startsWith(github.ref, 'refs/tags/v') && needs.discover.outputs.boards != '[]'
+    runs-on: ubuntu-latest
+    container:
+      image: kicad/kicad:9.0
+      options: --user root
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install kb
+        run: pip install --break-system-packages "${KICAD_BENCH_PKG}"
+      - name: Freeze release (export artifacts for ${{ github.ref_name }})
+        run: kb release-freeze "${{ github.ref_name }}" --config kicad-bench.toml --no-git
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: fab-${{ github.ref_name }}
+          path: releases/${{ github.ref_name }}/**/*
+          retention-days: 90
+      - name: Create/update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: releases/${{ github.ref_name }}/**/*
+          generate_release_notes: true

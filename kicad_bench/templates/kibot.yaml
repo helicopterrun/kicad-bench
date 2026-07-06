@@ -1,0 +1,62 @@
+# kibot.yaml — STARTER config for `kb release-freeze --backend kibot`.
+#
+# This is a minimal starting point using long-stable KiBot output types. Copy it to
+# your product root as `.kibot.yaml` and TUNE IT for your fab (variants, filters,
+# KiCad version, panelization). kicad-bench already gates ERC/DRC, so preflights are
+# off here to avoid double-running them.
+#
+# The KiBot backend exists for the artifacts kicad-cli can't emit — the interactive
+# HTML BOM (ibom), IPC-D-356 netlist, and a sourced BOM spreadsheet. Uncomment
+# ipc_d_356 once you've confirmed the output type on your KiBot version.
+#
+# Docs: https://kibot.readthedocs.io/en/latest/configuration/outputs.html
+kibot:
+  version: 1
+
+preflight:
+  erc: false
+  drc: false
+
+outputs:
+  - name: gerbers
+    comment: "Gerber X2 (fab-ready)"
+    type: gerber
+    dir: gerbers
+
+  - name: drill
+    comment: "Excellon drill (PTH + NPTH)"
+    type: excellon
+    dir: gerbers
+
+  - name: position
+    comment: "Pick-and-place centroid (CSV, mm)"
+    type: position
+    options:
+      format: CSV
+      units: millimeters
+
+  - name: step
+    comment: "STEP 3D model (mechanical handoff)"
+    type: step
+
+  - name: sch_pdf
+    comment: "Schematic PDF"
+    type: pdf_sch_print
+
+  - name: pcb_pdf
+    comment: "Board PDFs (copper / silk / assembly)"
+    type: pdf_pcb_print
+
+  - name: ibom
+    comment: "Interactive HTML BOM — kicad-cli can't produce this"
+    type: ibom
+
+  - name: bom
+    comment: "Sourced BOM (XLSX with MPN / distributor / stock / price)"
+    type: bom
+    options:
+      format: XLSX
+
+  # - name: ipc356
+  #   comment: "IPC-D-356 netlist (fab electrical test) — verify the type on your KiBot"
+  #   type: ipc_d_356

@@ -18,3 +18,6 @@ kb = "kicad_bench.main:main"
 
 [tool.setuptools.packages.find]
 include = ["kicad_bench*"]
+
+[tool.setuptools.package-data]
+kicad_bench = ["templates/*.yml", "templates/*.yaml"]
