@@ -6,9 +6,9 @@ that knows HOW, so a richer engine can be added without touching either caller.
 
 - **KicadCliBackend** (default, ships now) — stdlib + kicad-cli, zero extra deps.
   Gerbers, drill, position, plus STEP and schematic/board PDFs.
-- **KibotBackend** (documented, not built) — would add the artifacts kicad-cli can't
-  emit (interactive HTML BOM, IPC-D-356, sourced BOM-xlsx). Detected on PATH like
-  kicad-cli. See docs/product-workflow-merge.md §4.
+- **KibotBackend** (optional) — adds the artifacts kicad-cli can't emit (interactive
+  HTML BOM, IPC-D-356, sourced BOM-xlsx). Detected on PATH like kicad-cli; runs the
+  product's `.kibot.yaml` (or a packaged starter). Select with `--backend kibot`.
 
 Each backend's `export()` returns a `Result`, so a failed artifact fails the freeze via
 the usual exit-code contract. Read-first: exports only ever write into the target
@@ -16,12 +16,15 @@ out_dir; no design file is touched.
 """
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Protocol
 
 from .core import cli
 from .core.report import Result
+
+_TEMPLATES = Path(__file__).parent / "templates"
 
 # Artifact sets. `release-prep` emits the BASIC set into output/release/; a full freeze
 # emits FULL into releases/<version>/<board>/.
@@ -86,19 +89,54 @@ class KicadCliBackend:
 
 
 class KibotBackend:
-    """Documented future extension — not implemented. Adds ibom / IPC-D-356 / sourced
-    BOM-xlsx via KiBot. Reports itself unavailable so `get_backend('kibot')` fails fast
-    with a clear message until it lands (see docs/product-workflow-merge.md §4)."""
+    """Optional backend — runs KiBot for the artifacts kicad-cli can't emit (ibom /
+    IPC-D-356 / sourced BOM-xlsx). KiBot's outputs are defined by a `.kibot.yaml`, so the
+    fine-grained `artifacts` set does not apply here — it runs the whole config. The
+    config is resolved from `[fab].kibot_config`, then the product-root `.kibot.yaml`,
+    then a packaged starter template (which the user should tune for their fab)."""
     name = "kibot"
-    requires = "kibot on PATH + a .kibot.yaml (not yet implemented)"
+    requires = "kibot on PATH"
 
     def available(self) -> bool:
-        return False
+        return shutil.which("kibot") is not None
+
+    def _resolve_config(self, cfg) -> tuple[Path | None, bool]:
+        """Return (config_path, is_packaged_starter). None if nothing usable."""
+        root = getattr(cfg, "root", Path.cwd())
+        raw_fab = (getattr(cfg, "raw", None) or {}).get("fab", {})
+        override = raw_fab.get("kibot_config")
+        if override:
+            p = Path(override)
+            p = p if p.is_absolute() else root / p
+            if p.exists():
+                return p, False
+        sib = root / ".kibot.yaml"
+        if sib.exists():
+            return sib, False
+        starter = _TEMPLATES / "kibot.yaml"
+        return (starter, True) if starter.exists() else (None, False)
 
     def export(self, cfg, out_dir: Path, artifacts: tuple[str, ...] = FULL) -> Result:
-        raise NotImplementedError(
-            "the KiBot backend is a documented future extension "
-            "(docs/product-workflow-merge.md §4)")
+        res = Result(f"Fab export ({self.name})")
+        if not cfg.pcb:
+            res.error("no pcb configured for this board")
+            return res
+        conf, is_starter = self._resolve_config(cfg)
+        if conf is None:
+            res.error("no .kibot.yaml found (product root) and no packaged starter",
+                      detail="add a .kibot.yaml or set [fab].kibot_config")
+            return res
+        out_dir.mkdir(parents=True, exist_ok=True)
+        cmd = ["kibot", "-c", str(conf), "-b", str(cfg.pcb), "-d", str(out_dir)]
+        if cfg.root_sch:
+            cmd += ["-e", str(cfg.root_sch)]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            res.error("kibot run failed", detail=(r.stderr or r.stdout or "").strip()[:300])
+        else:
+            res.ok("kibot fab package" + (" (packaged starter config)" if is_starter else ""))
+        res.summary = f"kibot -> {out_dir}"
+        return res
 
 
 _BACKENDS = {"kicad-cli": KicadCliBackend, "kibot": KibotBackend}

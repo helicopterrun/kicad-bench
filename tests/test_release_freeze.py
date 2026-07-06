@@ -72,11 +72,55 @@ def test_get_backend():
         fab.get_backend("nope")
 
 
-def test_kibot_backend_unavailable():
+def test_kibot_backend_availability(monkeypatch):
     kb = fab.get_backend("kibot")
+    monkeypatch.setattr(fab.shutil, "which", lambda name: None)
     assert kb.available() is False
-    with pytest.raises(NotImplementedError):
-        kb.export(None, Path("/tmp/x"))
+    monkeypatch.setattr(fab.shutil, "which", lambda name: "/usr/bin/kibot")
+    assert kb.available() is True
+
+
+def _kibot_cfg(tmp_path, **raw_fab):
+    return type("C", (), {"pcb": tmp_path / "b.kicad_pcb",
+                          "root_sch": tmp_path / "b.kicad_sch",
+                          "root": tmp_path,
+                          "raw": {"fab": raw_fab} if raw_fab else {}})()
+
+
+def test_kibot_config_resolution(tmp_path):
+    kb = fab.KibotBackend()
+    # packaged starter when the product has none
+    conf, is_starter = kb._resolve_config(_kibot_cfg(tmp_path))
+    assert is_starter and conf.name == "kibot.yaml"
+    # product-root .kibot.yaml wins over the starter
+    (tmp_path / ".kibot.yaml").write_text("kibot: {version: 1}")
+    conf, is_starter = kb._resolve_config(_kibot_cfg(tmp_path))
+    assert not is_starter and conf == tmp_path / ".kibot.yaml"
+    # explicit [fab].kibot_config override wins over both
+    (tmp_path / "custom.yaml").write_text("kibot: {version: 1}")
+    conf, is_starter = kb._resolve_config(_kibot_cfg(tmp_path, kibot_config="custom.yaml"))
+    assert not is_starter and conf == tmp_path / "custom.yaml"
+
+
+def test_kibot_export_runs_and_reports(tmp_path, monkeypatch):
+    seen = []
+
+    def fake_run(cmd, **kw):
+        seen.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(fab.subprocess, "run", fake_run)
+    res = fab.KibotBackend().export(_kibot_cfg(tmp_path), tmp_path / "out")
+    assert res.passed
+    assert seen[0][0] == "kibot" and "-c" in seen[0] and "-b" in seen[0] and "-e" in seen[0]
+
+
+def test_kibot_export_reports_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(fab.subprocess, "run",
+                        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, "", "kibot boom"))
+    res = fab.KibotBackend().export(_kibot_cfg(tmp_path), tmp_path / "out")
+    assert not res.passed
+    assert any("kibot" in f.message for f in res.findings if f.severity == "error")
 
 
 def test_kicadcli_backend_job_set(tmp_path, monkeypatch):
