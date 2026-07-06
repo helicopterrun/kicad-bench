@@ -516,6 +516,14 @@ read-first.
 `skills/kicad-quality-gate` and `skills/kicad-layout-prep` are thin SKILL.md
 wrappers so Claude can drive the `kb` tools with the same guardrails.
 
+## Roadmap — product lifecycle
+
+`docs/product-workflow-merge.md` is the design/concept map for folding the older
+`kicad-product-workflow` skill (multi-board product monorepos, scaffolding, release
+freeze, approved-parts governance, CI) into `kb` — as a read-first, config-driven
+Priority-0 lifecycle tier. Design only for now; the doc is the blueprint for the
+incremental implementation.
+
 ## Layout
 
 ```
