@@ -158,6 +158,31 @@ def test_alternates_write_ignores_blank_mpn(tmp_path):
     assert [a["mpn"] for a in ba.read_alternates(tmp_path)["k"]] == ["GOOD"]
 
 
+def test_library_alternates_require_footprint_compatibility():
+    # two 10k parts: a pot (with an alt) and a resistor. The pot's alternate must NOT
+    # leak onto the resistor line just because both values normalize to 10000.
+    # the real approved package is free-text ("SMD-3P,…") that shares no token with the
+    # KiCad footprint — so matching must fall back to the MPN, which carries "3224W".
+    approved = {
+        ba.normalize_value("10k"): [
+            {"mpn": "3224W-1-103E", "package": "SMD-3P,4.8x3.5mm", "value": "10k",
+             "alt_mpn_1": "TC33X-2-103E", "alt_mpn_2": "", "notes": "trimpot"},
+        ],
+    }
+    prim, alts = ba._library_alternates("10k", "R_0402_1005Metric", approved)
+    assert (prim, alts) == ("", [])                               # resistor line: no match
+    prim, alts = ba._library_alternates("10k", "Potentiometer_Bourns_3224W_Vertical", approved)
+    assert prim == "3224W-1-103E" and [a["mpn"] for a in alts] == ["TC33X-2-103E"]
+
+
+def test_library_alternates_distinctive_value_matches_without_package():
+    approved = {ba.normalize_value("USBLC6-2SC6"): [
+        {"mpn": "USBLC6-2SC6", "package": "", "value": "USBLC6-2SC6",
+         "alt_mpn_1": "PRTR5V0U2X", "alt_mpn_2": ""}]}
+    prim, alts = ba._library_alternates("USBLC6-2SC6", "SOT23-6L_STM", approved)
+    assert prim == "USBLC6-2SC6" and [a["mpn"] for a in alts] == ["PRTR5V0U2X"]
+
+
 def test_merge_alternates_dedupes_user_wins():
     lib = [{"mpn": "ALT1", "source": "approved"}, {"mpn": "SHARED", "source": "approved"}]
     user = [{"mpn": "SHARED", "lcsc": "C9", "source": "user"}]

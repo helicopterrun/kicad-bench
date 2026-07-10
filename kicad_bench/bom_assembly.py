@@ -259,16 +259,35 @@ def _load_approved(cfg: Config) -> dict[str, list[dict]]:
     return index
 
 
+def _pkg_overlap(pkg: str, fp_leaf: str) -> bool:
+    """A significant token of the approved row's package appears in the footprint leaf —
+    e.g. `SOT23-6` ↔ `SOT23-6L_STM`, `3224W-1-103E` ↔ `…Bourns_3224W_Vertical`."""
+    return any(len(t) >= 4 and t in fp_leaf for t in re.split(r"[^a-z0-9]+", pkg))
+
+
+def _distinctive(value: str) -> bool:
+    """A value specific enough to match on alone (an MPN / IC name like `USBLC6-2SC6`),
+    versus a bare passive value (`10k`, `100nF`) that many different parts share."""
+    return bool(re.search(r"[A-Za-z]{3,}", value or ""))
+
+
 def _library_alternates(value: str, fp: str, approved: dict[str, list[dict]]) -> tuple[str, list[dict]]:
-    """(primary_mpn, [alt,…]) for a line, from the approved_parts row matching this
-    value (+ package when the value is ambiguous). Returns ("", []) when no confident
-    match — better to show nothing than to guess a second-source part."""
-    cands = approved.get(normalize_value(value), [])
-    if len(cands) > 1:                       # disambiguate by package token vs fp-leaf
-        fpl = leaf(fp).lower()
-        narrowed = [r for r in cands if (r.get("package") or "").strip().lower()
-                    and (r.get("package") or "").strip().lower() in fpl]
-        cands = narrowed or cands
+    """(primary_mpn, [alt,…]) for a line, from the approved_parts row matching this line's
+    value AND footprint. Bare passive values (10k, 100nF) require package/footprint
+    compatibility so a 10k pot's alternates aren't attached to a 10k resistor; distinctive
+    values (MPNs) may match on value alone. Returns ("", []) with no confident match —
+    better to show nothing than guess a second-source part."""
+    fpl = leaf(fp).lower()
+
+    def compatible(row: dict) -> bool:
+        # The approved `package` is free-text and often shares no token with the KiCad
+        # footprint name, but the MPN frequently does (`3224W-1-103E` ↔ `…3224W_Vertical`,
+        # `RC0402…` ↔ `R_0402…`). Try both; fall back to a distinctive value (IC/MPN) only.
+        if any(_pkg_overlap((row.get(f) or "").strip().lower(), fpl) for f in ("package", "mpn")):
+            return True
+        return _distinctive(value)
+
+    cands = [r for r in approved.get(normalize_value(value), []) if compatible(r)]
     if len(cands) != 1:
         return "", []
     row = cands[0]
