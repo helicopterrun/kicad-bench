@@ -39,6 +39,7 @@ brew install poppler. The cheap read commands (`search`, `figures`) do not.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -46,6 +47,7 @@ import shutil
 import ssl
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from collections import Counter
@@ -59,6 +61,7 @@ INDEX_DIRNAME = ".datasheet-index"     # committed text+JSON; figures/ self-giti
 MAX_VIEW_PAGES = 8
 
 # Bump when the extraction logic changes so `ingest` knows to re-build stale indexes.
+# v2: also pre-render the pinout SECTION page (front-page / generic-caption pinouts).
 TOOL_VERSION = 2
 FIGURE_DPI = 150                       # default render DPI for pre-built figure PNGs
 MAX_FIGS_PER_KIND = 3                  # cap typical-app / layout pages rendered per doc
@@ -367,12 +370,26 @@ def _render_figures(pdf: Path, root: Path, sections: dict[str, list[int]],
     figures: list[dict] = []
     if not shutil.which("pdftoppm"):
         return figures
+    # Caption-matched pinout figures first ("Figure N. <pkg> package pinout"), tagged with
+    # their package so `figures --package` can pick one.
+    pinout_pages: set[int] = set()
     for page, pkgs in pin_figs:
         for pk in pkgs:
             name = f"pinout-{_safe(pk)}.png"
             _render_named(pdf, page, name, dpi, root)
             figures.append({"kind": "pinout", "package": pk, "page": page,
                             "path": f"figures/{name}"})
+        pinout_pages.add(page)
+    # Then the detected pinout SECTION page(s) — catches datasheets that put the pin diagram
+    # on the front page or under a generic "Figure 1" caption (no package in the caption), as
+    # long as they aren't already covered by a caption figure above.
+    for page in sections.get("pinout", [])[:MAX_FIGS_PER_KIND]:
+        if page in pinout_pages:
+            continue
+        name = f"pinout-p{page:03d}.png"
+        _render_named(pdf, page, name, dpi, root)
+        figures.append({"kind": "pinout", "page": page, "path": f"figures/{name}"})
+        pinout_pages.add(page)
     for kind in ("typical-app", "layout"):
         for page in sections.get(kind, [])[:MAX_FIGS_PER_KIND]:
             name = f"{kind}-p{page:03d}.png"
@@ -901,22 +918,45 @@ def _ssl_context() -> ssl.SSLContext:
     return ctx
 
 
-def _download(url: str, dest: Path, root: Path) -> Path:
+def _download(url: str, dest: Path, root: Path, attempts: int = 3) -> Path:
     """Download `url` to `dest`, validating the %PDF magic header first. urllib's default
-    opener honors HTTPS_PROXY from the environment, so we never touch the proxy config."""
-    req = urllib.request.Request(url, headers={"User-Agent": _HTTP_UA})
-    with urllib.request.urlopen(req, timeout=45, context=_ssl_context()) as r:
-        data = r.read()
-    if not data.startswith(b"%PDF"):
-        raise ValueError(f"response is not a PDF (starts with {data[:16]!r}) — likely an "
-                         "HTML interstitial, login wall, or redirect page")
-    tmp = _ensure_index_root(root) / ".tmp"
-    tmp.mkdir(parents=True, exist_ok=True)
-    scratch = tmp / (dest.name + ".part")
-    scratch.write_bytes(data)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    scratch.replace(dest)
-    return dest
+    opener honors HTTPS_PROXY from the environment, so we never touch the proxy config.
+
+    Reads in chunks and retries on a truncated/interrupted transfer (a re-terminating proxy
+    can drop a large PDF mid-stream → IncompleteRead). A non-PDF body is NOT retried — it's a
+    content/policy problem, not a transient one, so it fails fast for the caller to report."""
+    last: Exception | None = None
+    for i in range(attempts):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": _HTTP_UA})
+            buf = bytearray()
+            with urllib.request.urlopen(req, timeout=60, context=_ssl_context()) as r:
+                expected = r.headers.get("Content-Length")
+                while True:
+                    chunk = r.read(65536)
+                    if not chunk:
+                        break
+                    buf.extend(chunk)
+            data = bytes(buf)
+            # A re-terminating proxy can cap a large body and close cleanly (no IncompleteRead),
+            # so cross-check the promised length — never ingest a silently truncated PDF.
+            if expected is not None and len(data) < int(expected):
+                raise http.client.IncompleteRead(data, int(expected) - len(data))
+        except (http.client.IncompleteRead, urllib.error.URLError, TimeoutError, OSError) as e:
+            last = e
+            time.sleep(1 + i)            # brief backoff, then re-request from the top
+            continue
+        if not data.startswith(b"%PDF"):
+            raise ValueError(f"response is not a PDF (starts with {data[:16]!r}) — likely an "
+                             "HTML interstitial, login wall, or redirect page")
+        tmp = _ensure_index_root(root) / ".tmp"
+        tmp.mkdir(parents=True, exist_ok=True)
+        scratch = tmp / (dest.name + ".part")
+        scratch.write_bytes(data)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        scratch.replace(dest)
+        return dest
+    raise last if last else RuntimeError("download failed")
 
 
 def _canonical_pdf_name(part: str, url: str) -> str:

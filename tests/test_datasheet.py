@@ -56,6 +56,39 @@ def test_download_accepts_pdf(tmp_path):
     assert out.exists() and out.read_bytes().startswith(b"%PDF")
 
 
+class _FakeResp:
+    """Minimal urlopen() context-manager stand-in: serves `body` with a (possibly lying)
+    Content-Length header so we can exercise the truncation guard without a network."""
+    def __init__(self, body: bytes, content_length: int | None):
+        self._buf = io.BytesIO(body)
+        self.headers = {} if content_length is None else {"Content-Length": str(content_length)}
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def read(self, n=-1): return self._buf.read(n)
+
+
+def test_download_rejects_truncated_body(tmp_path, monkeypatch):
+    # Server promises 5000 bytes but the (proxy-capped) stream ends cleanly at far fewer.
+    monkeypatch.setattr(ds.time, "sleep", lambda *_: None)   # no backoff delay in tests
+    calls = {"n": 0}
+    def fake_urlopen(req, timeout=None, context=None):
+        calls["n"] += 1
+        return _FakeResp(b"%PDF-1.4 short", content_length=5000)
+    monkeypatch.setattr(ds.urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(ds.http.client.IncompleteRead):
+        ds._download("https://x/y.pdf", tmp_path / "Datasheets" / "y.pdf", tmp_path, attempts=3)
+    assert calls["n"] == 3                                    # retried, then gave up
+    assert not (tmp_path / "Datasheets" / "y.pdf").exists()   # never wrote a truncated PDF
+
+
+def test_download_accepts_full_body_with_content_length(tmp_path, monkeypatch):
+    body = b"%PDF-1.4\nfull body\n%%EOF"
+    monkeypatch.setattr(ds.urllib.request, "urlopen",
+                        lambda req, timeout=None, context=None: _FakeResp(body, len(body)))
+    out = ds._download("https://x/y.pdf", tmp_path / "Datasheets" / "y.pdf", tmp_path)
+    assert out.read_bytes() == body
+
+
 # -- canonical download names (path safety) -------------------------------
 def test_canonical_pdf_name():
     assert ds._canonical_pdf_name("TPS65150", "http://x/a.pdf") == "TPS65150.pdf"
@@ -283,3 +316,17 @@ def test_leader_toc_page_excluded_from_sections():
     toc = ds._toc_pages(loc) | ds._leader_toc_pages(pages)
     pinout = [p for p in loc["pinout"] if p not in toc]
     assert pinout == [3] and 1 not in pinout                         # TOC dropped, heading kept
+
+
+@poppler
+def test_ingest_renders_pinout_section_without_caption(tmp_path):
+    """A pinout on a page with no 'Figure N. <pkg> pinout' caption is still pre-rendered
+    from the detected pinout SECTION (named by page, no package)."""
+    (tmp_path / "Datasheets").mkdir()
+    pdf = tmp_path / "Datasheets" / "front.pdf"
+    _make_pdf(pdf, ["Pin Assignments\nIN 1  OUT 5  (no figure caption on this page)"])
+    man = ds._ingest_one(pdf, tmp_path)["manifest"]
+    pin = [f for f in man["figures"] if f["kind"] == "pinout"]
+    assert pin and pin[0]["page"] == 1 and "package" not in pin[0]
+    assert pin[0]["path"] == "figures/pinout-p001.png"
+    assert (ds._index_dir(tmp_path, pdf) / "figures" / "pinout-p001.png").exists()
