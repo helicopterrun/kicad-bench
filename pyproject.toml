@@ -9,9 +9,15 @@ description = "Generic, config-driven KiCad-10 workflow & PCB-design workbench (
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "helicopterrun" }]
-# Stdlib-only core (tomllib, argparse, xml, re, subprocess). KiCad work is done by
-# shelling out to `kicad-cli`, so there is no hard dependency on kicad-sch-api here.
+# Lightweight core: KiCad work is done by shelling out to `kicad-cli`, and files are
+# read with stdlib (tomllib, xml, re) — so the base install stays dependency-free and
+# stays a safe leaf for consumers (e.g. the cockpit). Features that genuinely need a
+# third-party library declare it as an optional extra below rather than importing it
+# undeclared; install with e.g. `pip install kicad-bench[xlsx]`.
 dependencies = []
+
+[project.optional-dependencies]
+xlsx = ["openpyxl"]   # read/write BOM .xlsx (bom_assembly, datasheet BOM export, release-prep)
 
 [project.scripts]
 kb = "kicad_bench.main:main"

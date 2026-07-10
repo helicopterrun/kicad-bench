@@ -139,16 +139,31 @@ _BOM_COLS = {
 }
 
 
+def _require_openpyxl():
+    """Import openpyxl, or fail with an actionable hint. openpyxl is the optional `xlsx`
+    extra — reading a BOM workbook is the one place kicad-bench needs a third-party lib,
+    so a missing install is surfaced clearly instead of silently yielding an empty BOM."""
+    try:
+        import openpyxl
+        return openpyxl
+    except ModuleNotFoundError as e:
+        raise RuntimeError(
+            "reading a BOM .xlsx needs openpyxl, which isn't installed. Install the extra: "
+            "pip install 'kicad-bench[xlsx]'"
+        ) from e
+
+
 def _read_bom(path: Path | None) -> list[dict]:
     """Parse the board BOM xlsx into line dicts: {value, footprint(leaf), lcsc, section,
     status, notes, refs:[…]} with comma-separated designator groups expanded. Empty list
-    if there's no BOM or it can't be read."""
+    when there's no BOM file; a corrupt/locked workbook also degrades to empty, but a
+    missing openpyxl raises (see `_require_openpyxl`) rather than silently degrading."""
     if not (path and path.exists()):
         return []
+    openpyxl = _require_openpyxl()
     try:
-        import openpyxl  # local import: only needed when a BOM exists
         wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 — a corrupt/locked workbook degrades to an empty BOM
         return []
     ws = wb.active
     rows = ws.iter_rows(values_only=True)
