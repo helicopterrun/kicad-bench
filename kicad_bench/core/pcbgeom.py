@@ -69,7 +69,13 @@ _WIDTH = re.compile(r"\(width\s+(-?[\d.]+)\)")
 _LAYER = re.compile(r'\(layer\s+"([^"]*)"\)')
 _LAYERS = re.compile(r'\(layers\s+([^)]*)\)')
 _SIZE1 = re.compile(r"\(size\s+(-?[\d.]+)\)")
+_SIZE2 = re.compile(r"\(size\s+(-?[\d.]+)\s+(-?[\d.]+)\)")
 _DRILL = re.compile(r"\(drill\s+(-?[\d.]+)\)")
+# `(at X Y [ROT])` — like _AT but also captures the optional rotation third field, for
+# footprint placement + pad orientation (pin-1 visual). _AT is left untouched.
+_AT3 = re.compile(r"\(at\s+(-?[\d.]+)\s+(-?[\d.]+)(?:\s+(-?[\d.]+))?")
+_FP_VALUE = re.compile(r'\(property\s+"Value"\s+"([^"]*)"')
+_PAD_HEAD = re.compile(r'\(pad\s+"([^"]*)"\s+(\S+)\s+(\S+)')
 # net forms, most specific first
 _NET_NUMNAME = re.compile(r'\(net\s+(\d+)\s+"([^"]*)"\)')
 _NET_NAME = re.compile(r'\(net\s+"([^"]*)"\)')
@@ -134,6 +140,38 @@ class Pad:
 
 
 @dataclass
+class PadGeom:
+    """One pad in a footprint's LOCAL frame (offsets before the footprint is rotated
+    or side-mirrored). Used only for the pin-1 orientation visual, never by the net /
+    geometry audits."""
+    number: str
+    lx: float          # local x offset from the footprint origin (mm)
+    ly: float          # local y offset (mm)
+    lrot: float        # local pad rotation (deg)
+    w: float           # pad width (mm)
+    h: float           # pad height (mm)
+    shape: str         # rect | roundrect | circle | oval | …
+
+
+@dataclass
+class Placement:
+    """A footprint's placement on the board: origin, rotation, side, value, and the
+    local pad geometry. Additive to the net-oriented parse — the pin-1 orientation
+    feature reads this; nothing else does."""
+    ref: str
+    fpid: str
+    x: float           # footprint origin, board coords (mm)
+    y: float
+    rot: float         # footprint rotation (deg, as stored)
+    side: str          # "top" (F.Cu) | "bottom" (B.Cu)
+    value: str
+    pads: list[PadGeom] = field(default_factory=list)
+
+    def pad(self, number: str) -> "PadGeom | None":
+        return next((p for p in self.pads if p.number == number), None)
+
+
+@dataclass
 class Zone:
     net: str
     layers: tuple[str, ...]
@@ -147,6 +185,7 @@ class Board:
     pads: list[Pad] = field(default_factory=list)
     zones: list[Zone] = field(default_factory=list)
     footprints: dict[str, str] = field(default_factory=dict)  # ref -> fpid
+    placements: dict[str, "Placement"] = field(default_factory=dict)  # ref -> Placement
 
     # -- net views ----------------------------------------------------------
     @property
@@ -306,12 +345,50 @@ def parse(path: str | Path) -> Board:
         rm = _REF.search(blk)
         ref = rm.group(1) if rm else ""
         idm = re.match(r'\(footprint\s+"([^"]*)"', blk)
+        fpid = idm.group(1) if idm else ""
         if ref:
-            board.footprints[ref] = idm.group(1) if idm else ""
+            board.footprints[ref] = fpid
         for pad in _iter_blocks(blk, "pad"):
             pm = re.match(r'\(pad\s+"([^"]*)"', pad)
             net = _net_of(pad, table)
             if net:
                 board.pads.append(Pad(ref, pm.group(1) if pm else "", net))
+        # placement geometry (pin-1 orientation visual) — additive, self-contained.
+        if ref:
+            board.placements[ref] = _placement(blk, ref, fpid)
 
     return board
+
+
+def _placement(blk: str, ref: str, fpid: str) -> "Placement":
+    """Extract a footprint's origin/rotation/side/value + local pad geometry from its
+    s-expr block. The footprint's own `(at …)` and `(layer …)` precede its first
+    `(property …)`, so we read them from that header slice to avoid grabbing a
+    property's or pad's `at`/layer by mistake."""
+    pi = blk.find("(property")
+    head = blk[:pi] if pi != -1 else blk
+    at = _AT3.search(head)
+    lay = _LAYER.search(head)
+    valm = _FP_VALUE.search(blk)
+    pl = Placement(
+        ref=ref, fpid=fpid,
+        x=float(at.group(1)) if at else 0.0,
+        y=float(at.group(2)) if at else 0.0,
+        rot=float(at.group(3)) if (at and at.group(3)) else 0.0,
+        side="bottom" if (lay and lay.group(1) == "B.Cu") else "top",
+        value=valm.group(1) if valm else "",
+    )
+    for pad in _iter_blocks(blk, "pad"):
+        ph = _PAD_HEAD.match(pad)
+        pat = _AT3.search(pad)          # first (at …) in a pad block is its local offset
+        psz = _SIZE2.search(pad)
+        pl.pads.append(PadGeom(
+            number=ph.group(1) if ph else "",
+            lx=float(pat.group(1)) if pat else 0.0,
+            ly=float(pat.group(2)) if pat else 0.0,
+            lrot=float(pat.group(3)) if (pat and pat.group(3)) else 0.0,
+            w=float(psz.group(1)) if psz else 0.0,
+            h=float(psz.group(2)) if psz else 0.0,
+            shape=ph.group(3) if ph else "",
+        ))
+    return pl

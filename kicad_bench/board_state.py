@@ -26,7 +26,9 @@ from pathlib import Path
 
 from .core import cli
 from .core import config as cfgmod
+from .core import pcbgeom
 from . import audit
+from . import bom_assembly as bommod
 from . import datasheet as dsmod
 
 
@@ -51,6 +53,12 @@ class BoardState:
         # Parts tab: work-list⋈datasheets overview, cached by BOM+index mtime
         self._parts_cache: dict | None = None
         self._parts_sig_val = None
+        # BOM tab: sch⋈pcb⋈bom⋈alternates assembly, cached by sch+pcb+bom+alt mtime
+        self._bom_cache: dict | None = None
+        self._bom_sig_val = None
+        # PCB placements (pin-1 orientation), cached by board mtime
+        self._placements: dict | None = None
+        self._placements_mtime = None
 
     def _mtime(self):
         p = self.cfg.pcb
@@ -288,6 +296,61 @@ class BoardState:
         with self.lock:
             self._parts_cache, self._parts_sig_val = ov, sig
         return ov
+
+    # ---- BOM tab: sch⋈pcb⋈bom⋈alternates assembly + pin-1 orientation ----
+    def _bom_sig(self):
+        """Change signal: schematic + PCB + BOM + alternates-file mtimes. Editing any
+        source (or an alternate) invalidates the assembled BOM."""
+        def mt(p):
+            return p.stat().st_mtime if p and p.exists() else 0
+        alt = bommod._alternates_path(self.cfg.root)
+        return (self.sch_mtime(), self._mtime(), mt(self.cfg.bom), mt(alt))
+
+    def bom(self) -> dict:
+        """Assembled, value-checked, alternate-annotated BOM (see bom_assembly.build).
+        Cached by the combined source mtimes; the ~1s netlist export runs outside the
+        lock so it never stalls other tabs."""
+        sig = self._bom_sig()
+        with self.lock:
+            if self._bom_cache is not None and self._bom_sig_val == sig:
+                return self._bom_cache
+        data = bommod.build(self.cfg)
+        with self.lock:
+            self._bom_cache, self._bom_sig_val = data, sig
+        return data
+
+    def placements(self) -> dict:
+        """ref -> pcbgeom.Placement, board-mtime cached (shared by the BOM tab's
+        orientation SVGs). Empty dict if there's no board or the parse fails."""
+        m = self._mtime()
+        with self.lock:
+            if self._placements is not None and self._placements_mtime == m:
+                return self._placements
+        pcb = self.cfg.pcb
+        try:
+            pls = pcbgeom.parse(pcb).placements if (pcb and pcb.exists()) else {}
+        except Exception:  # noqa: BLE001 — a parse failure must not break the tab
+            pls = {}
+        with self.lock:
+            self._placements, self._placements_mtime = pls, m
+        return pls
+
+    def orient_svg(self, ref: str) -> str | None:
+        """The pin-1 orientation SVG for one designator, or None if it isn't placed."""
+        pl = self.placements().get(ref)
+        return bommod.orient_svg(pl) if pl else None
+
+    def bom_csv(self) -> str:
+        """Fab-ready assembly BOM CSV (with an Approved Alternates column)."""
+        return bommod.export_csv(self.cfg)
+
+    def set_alternates(self, key: str, alternates: list) -> dict:
+        """Persist one line's user alternates to .cockpit/bom_alternates.json and drop
+        the BOM cache so the next read reflects the change."""
+        bommod.write_alternates(self.cfg.root, key, alternates)
+        with self.lock:
+            self._bom_cache = self._bom_sig_val = None
+        return self.bom()
 
     def ds_figure(self, slug: str, relpath: str):
         """Bytes of a pre-rendered index figure PNG (figures/…), or None. Path-guarded:
