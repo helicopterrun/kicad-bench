@@ -204,19 +204,21 @@ def test_kicad10_patch():
 def test_references_filters_templates(tmp_path):
     # lib_symbols template "C"/"R" must be filtered; only real designators kept.
     sch = write(tmp_path, "x.kicad_sch", """
-(lib_symbols (symbol "Device:C" (property "Reference" "C" (at 0 0 0))))
-(symbol (property "Reference" "C45" (at 1 1 0)))
-(symbol (property "Reference" "U5" (at 2 2 0)))
-(symbol (property "Reference" "RV1" (at 3 3 0)))
-(symbol (property "Reference" "#PWR01" (at 4 4 0)))
+(kicad_sch
+  (lib_symbols (symbol "Device:C" (property "Reference" "C" (at 0 0 0))))
+  (symbol (property "Reference" "C45" (at 1 1 0)))
+  (symbol (property "Reference" "U5" (at 2 2 0)))
+  (symbol (property "Reference" "RV1" (at 3 3 0)))
+  (symbol (property "Reference" "#PWR01" (at 4 4 0))))
 """)
     assert set(schparse.references(sch)) == {"C45", "U5", "RV1"}
 
 
 def test_input_hier_nets(tmp_path):
     sch = write(tmp_path, "x.kicad_sch", """
-(hierarchical_label "VIN_12V" (shape input) (at 0 0 0) (uuid abc))
-(hierarchical_label "VOUT" (shape output) (at 1 0 0) (uuid def))
-(hierarchical_label "SDA" (shape bidirectional) (at 2 0 0) (uuid ghi))
+(kicad_sch
+  (hierarchical_label "VIN_12V" (shape input) (at 0 0 0) (uuid abc))
+  (hierarchical_label "VOUT" (shape output) (at 1 0 0) (uuid def))
+  (hierarchical_label "SDA" (shape bidirectional) (at 2 0 0) (uuid ghi)))
 """)
     assert schparse.input_hier_nets(sch) == {"VIN_12V", "SDA"}

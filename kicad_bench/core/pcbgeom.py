@@ -22,6 +22,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import sexp
+
 COPPER_RE = re.compile(r"\.Cu$")
 
 
@@ -54,39 +56,17 @@ def _balanced(text: str, start: int) -> tuple[str, int]:
     return text[start:], n
 
 
-def _iter_blocks(text: str, keyword: str):
-    """Yield each `(keyword …)` block in `text` (non-nested element keywords)."""
-    for m in re.finditer(r"\(" + re.escape(keyword) + r"\b", text):
-        yield _balanced(text, m.start())[0]
-
-
-# --- small field extractors -------------------------------------------------
-_AT = re.compile(r"\(at\s+(-?[\d.]+)\s+(-?[\d.]+)")
-_START = re.compile(r"\(start\s+(-?[\d.]+)\s+(-?[\d.]+)\)")
-_MID = re.compile(r"\(mid\s+(-?[\d.]+)\s+(-?[\d.]+)\)")
-_END = re.compile(r"\(end\s+(-?[\d.]+)\s+(-?[\d.]+)\)")
+# --- raw-text scanners for iter_track_spans --------------------------------
+# parse() below reads the structured S-expression tree; these regexes remain only for
+# iter_track_spans, which must locate the exact BYTES of a `(width …)` token to rewrite one
+# track in place without re-serialising the board.
 _WIDTH = re.compile(r"\(width\s+(-?[\d.]+)\)")
 _LAYER = re.compile(r'\(layer\s+"([^"]*)"\)')
-_LAYERS = re.compile(r'\(layers\s+([^)]*)\)')
-_SIZE1 = re.compile(r"\(size\s+(-?[\d.]+)\)")
-_SIZE2 = re.compile(r"\(size\s+(-?[\d.]+)\s+(-?[\d.]+)\)")
-_DRILL = re.compile(r"\(drill\s+(-?[\d.]+)\)")
-# `(at X Y [ROT])` — like _AT but also captures the optional rotation third field, for
-# footprint placement + pad orientation (pin-1 visual). _AT is left untouched.
-_AT3 = re.compile(r"\(at\s+(-?[\d.]+)\s+(-?[\d.]+)(?:\s+(-?[\d.]+))?")
-_FP_VALUE = re.compile(r'\(property\s+"Value"\s+"([^"]*)"')
-_PAD_HEAD = re.compile(r'\(pad\s+"([^"]*)"\s+(\S+)\s+(\S+)')
 # net forms, most specific first
 _NET_NUMNAME = re.compile(r'\(net\s+(\d+)\s+"([^"]*)"\)')
 _NET_NAME = re.compile(r'\(net\s+"([^"]*)"\)')
 _NET_NUM = re.compile(r"\(net\s+(\d+)\)")
 _NET_DECL = re.compile(r'\(net\s+(\d+)\s+"([^"]*)"\)')
-_REF = re.compile(r'\(property\s+"Reference"\s+"([^"]*)"')
-
-
-def _pt(rx: re.Pattern, block: str):
-    m = rx.search(block)
-    return (float(m.group(1)), float(m.group(2))) if m else None
 
 
 def _net_of(block: str, table: dict[int, str]) -> str:
@@ -300,95 +280,114 @@ def iter_track_spans(text: str, table: dict[int, str] | None = None):
 
 
 # --- parse ------------------------------------------------------------------
+# Element extraction walks the parsed S-expression tree (see core.sexp): each field is a
+# named DIRECT child of its element, so — unlike a flat regex `.search` — a footprint's own
+# `(at …)` can't be confused with a pad's, and a reordered/added token can't desync the read.
+# `iter_track_spans` (byte-offset surgical edits) stays on the raw text below.
+def _net_of_node(node, table: dict[int, str]) -> str:
+    """Resolve an element's net name, mirroring the three stored forms:
+    `(net N "name")` → name · `(net "name")` → name · `(net N)` → table[N]."""
+    n = sexp.first(node, "net")
+    if n is None:
+        return ""
+    if len(n) >= 3:                       # (net N "name")
+        return sexp.sym(n[2])
+    if len(n) == 2:
+        return n[1] if isinstance(n[1], str) else table.get(int(n[1]), "")
+    return ""
+
+
+def _xy(node, key: str):
+    n = sexp.first(node, key)
+    return (float(n[1]), float(n[2])) if n and len(n) >= 3 else None
+
+
+def _num(node, key: str):
+    """The first number of `(key N …)`, or None if the field is absent (presence, not
+    truthiness — a legitimate 0 width must not read as missing)."""
+    n = sexp.first(node, key)
+    return float(n[1]) if n and len(n) >= 2 else None
+
+
+def _prop(node, name: str) -> str:
+    """A footprint `(property "<name>" "<value>")` value, or ""."""
+    for p in sexp.children(node, "property"):
+        if len(p) >= 3 and sexp.sym(p[1]) == name:
+            return sexp.sym(p[2])
+    return ""
+
+
 def parse(path: str | Path) -> Board:
     p = Path(path)
-    text = p.read_text(encoding="utf-8", errors="ignore")
     board = Board(path=p)
+    root = sexp.load(p.read_text(encoding="utf-8", errors="ignore"))
 
-    # net-number table (declarations: `(net 5 "GND")`)
-    table = {int(num): name for num, name in _NET_DECL.findall(text)}
+    # net-number table from every `(net N "name")` (top-level declarations + inline).
+    table: dict[int, str] = {}
+    for n in sexp.walk(root, "net"):
+        if len(n) >= 3 and isinstance(n[1], (int, float)):
+            table[int(n[1])] = sexp.sym(n[2])
 
-    for blk in _iter_blocks(text, "segment"):
-        s, e, w = _pt(_START, blk), _pt(_END, blk), _WIDTH.search(blk)
-        lay = _LAYER.search(blk)
-        if s and e and w and lay:
-            board.tracks.append(Track(_net_of(blk, table), lay.group(1),
-                                      float(w.group(1)), s, e))
-
-    for blk in _iter_blocks(text, "arc"):
-        s, m, e, w = _pt(_START, blk), _pt(_MID, blk), _pt(_END, blk), _WIDTH.search(blk)
-        lay = _LAYER.search(blk)
-        if s and m and e and w and lay:
-            board.tracks.append(Track(_net_of(blk, table), lay.group(1),
-                                      float(w.group(1)), s, e, mid=m))
-
-    for blk in _iter_blocks(text, "via"):
-        at = _pt(_AT, blk)
-        size = _SIZE1.search(blk)
-        drill = _DRILL.search(blk)
-        lm = _LAYERS.search(blk)
-        layers = tuple(re.findall(r'"([^"]*)"', lm.group(1))) if lm else ()
-        if at and size:
-            board.vias.append(Via(_net_of(blk, table), at,
-                                  float(size.group(1)),
-                                  float(drill.group(1)) if drill else 0.0, layers))
-
-    for blk in _iter_blocks(text, "zone"):
-        lay = _LAYER.search(blk)
-        lm = _LAYERS.search(blk)
-        layers = ((lay.group(1),) if lay else
-                  tuple(re.findall(r'"([^"]*)"', lm.group(1))) if lm else ())
-        board.zones.append(Zone(_net_of(blk, table), layers))
-
-    # footprints — capture reference and per-pad nets (no rotated geometry needed)
-    for blk in _iter_blocks(text, "footprint"):
-        rm = _REF.search(blk)
-        ref = rm.group(1) if rm else ""
-        idm = re.match(r'\(footprint\s+"([^"]*)"', blk)
-        fpid = idm.group(1) if idm else ""
-        if ref:
-            board.footprints[ref] = fpid
-        for pad in _iter_blocks(blk, "pad"):
-            pm = re.match(r'\(pad\s+"([^"]*)"', pad)
-            net = _net_of(pad, table)
-            if net:
-                board.pads.append(Pad(ref, pm.group(1) if pm else "", net))
-        # placement geometry (pin-1 orientation visual) — additive, self-contained.
-        if ref:
-            board.placements[ref] = _placement(blk, ref, fpid)
+    for node in root[1:]:
+        kind = sexp.head(node)
+        if kind in ("segment", "arc"):
+            s, e, w, lay = _xy(node, "start"), _xy(node, "end"), _num(node, "width"), sexp.first(node, "layer")
+            mid = _xy(node, "mid") if kind == "arc" else None
+            if s and e and w is not None and lay and (kind == "segment" or mid):
+                board.tracks.append(Track(_net_of_node(node, table), sexp.sym(lay[1]), w, s, e, mid=mid))
+        elif kind == "via":
+            at, size = _xy(node, "at"), _num(node, "size")
+            lm = sexp.first(node, "layers")
+            if at and size is not None:
+                layers = tuple(sexp.sym(x) for x in lm[1:]) if lm else ()
+                board.vias.append(Via(_net_of_node(node, table), at, size, _num(node, "drill") or 0.0, layers))
+        elif kind == "zone":
+            lay, lm = sexp.first(node, "layer"), sexp.first(node, "layers")
+            layers = ((sexp.sym(lay[1]),) if lay else
+                      tuple(sexp.sym(x) for x in lm[1:]) if lm else ())
+            board.zones.append(Zone(_net_of_node(node, table), layers))
+        elif kind == "footprint":
+            _footprint(node, board, table)
 
     return board
 
 
-def _placement(blk: str, ref: str, fpid: str) -> "Placement":
-    """Extract a footprint's origin/rotation/side/value + local pad geometry from its
-    s-expr block. The footprint's own `(at …)` and `(layer …)` precede its first
-    `(property …)`, so we read them from that header slice to avoid grabbing a
-    property's or pad's `at`/layer by mistake."""
-    pi = blk.find("(property")
-    head = blk[:pi] if pi != -1 else blk
-    at = _AT3.search(head)
-    lay = _LAYER.search(head)
-    valm = _FP_VALUE.search(blk)
+def _footprint(node, board: Board, table: dict[int, str]) -> None:
+    """Capture a footprint's ref→fpid, its net-bearing pads, and its placement geometry."""
+    ref = _prop(node, "Reference")
+    fpid = sexp.sym(node[1]) if len(node) >= 2 else ""
+    if ref:
+        board.footprints[ref] = fpid
+    for pad in sexp.children(node, "pad"):
+        net = _net_of_node(pad, table)
+        if net:
+            board.pads.append(Pad(ref, sexp.sym(pad[1]) if len(pad) >= 2 else "", net))
+    if ref:
+        board.placements[ref] = _placement(node, ref, fpid)
+
+
+def _placement(node, ref: str, fpid: str) -> "Placement":
+    """A footprint's origin/rotation/side/value + local pad geometry, read from its direct
+    children (the footprint's own `at`/`layer`, not a pad's or property's)."""
+    at = sexp.first(node, "at")
+    lay = sexp.first(node, "layer")
     pl = Placement(
         ref=ref, fpid=fpid,
-        x=float(at.group(1)) if at else 0.0,
-        y=float(at.group(2)) if at else 0.0,
-        rot=float(at.group(3)) if (at and at.group(3)) else 0.0,
-        side="bottom" if (lay and lay.group(1) == "B.Cu") else "top",
-        value=valm.group(1) if valm else "",
+        x=float(at[1]) if at and len(at) >= 3 else 0.0,
+        y=float(at[2]) if at and len(at) >= 3 else 0.0,
+        rot=float(at[3]) if at and len(at) >= 4 else 0.0,
+        side="bottom" if (lay and sexp.sym(lay[1]) == "B.Cu") else "top",
+        value=_prop(node, "Value"),
     )
-    for pad in _iter_blocks(blk, "pad"):
-        ph = _PAD_HEAD.match(pad)
-        pat = _AT3.search(pad)          # first (at …) in a pad block is its local offset
-        psz = _SIZE2.search(pad)
+    for pad in sexp.children(node, "pad"):
+        pat, psz = sexp.first(pad, "at"), sexp.first(pad, "size")
         pl.pads.append(PadGeom(
-            number=ph.group(1) if ph else "",
-            lx=float(pat.group(1)) if pat else 0.0,
-            ly=float(pat.group(2)) if pat else 0.0,
-            lrot=float(pat.group(3)) if (pat and pat.group(3)) else 0.0,
-            w=float(psz.group(1)) if psz else 0.0,
-            h=float(psz.group(2)) if psz else 0.0,
-            shape=ph.group(3) if ph else "",
+            number=sexp.sym(pad[1]) if len(pad) >= 2 else "",
+            lx=float(pat[1]) if pat and len(pat) >= 3 else 0.0,
+            ly=float(pat[2]) if pat and len(pat) >= 3 else 0.0,
+            lrot=float(pat[3]) if pat and len(pat) >= 4 else 0.0,
+            w=float(psz[1]) if psz and len(psz) >= 3 else 0.0,
+            h=float(psz[2]) if psz and len(psz) >= 3 else 0.0,
+            shape=sexp.sym(pad[3]) if len(pad) >= 4 else "",
         ))
     return pl

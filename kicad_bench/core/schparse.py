@@ -1,37 +1,45 @@
 """schparse.py — read-only parsers for KiCad schematic & lib-table files.
 
-Pure text/regex parsing (no kicad-sch-api dependency, no mutation). Consolidates
-the parsing that the project's validate_sheet.py and validate_footprints.py do, so
-the kicad-bench tools share one implementation.
+Structural S-expression parsing over `core.sexp` (no kicad-sch-api, no mutation): symbols,
+labels, and lib-table entries are read as tree nodes with named children, so a Value is
+never mispaired with the wrong symbol's Datasheet the way a positional `.*?` regex can, and
+a reordered/added KiCad token can't desync the read. Consolidates the parsing the project's
+validate_sheet.py / validate_footprints.py did, so the kicad-bench tools share one path.
 """
 from __future__ import annotations
 
 import re
 from pathlib import Path
 
-_HIER_LABEL = re.compile(r'\(hierarchical_label\s+"([^"]+)"(.*?)\(uuid', re.S)
-_SHAPE = re.compile(r"\(shape\s+(\w+)\)")
-_FOOTPRINT = re.compile(r'\(property\s+"Footprint"\s+"([^"]*)"')
-_REFERENCE = re.compile(r'\(property\s+"Reference"\s+"([^"]*)"')
-_VALUE = re.compile(r'\(property\s+"Value"\s+"([^"]*)"')
-_LIB_ENTRY = re.compile(r'\(lib\s+\(name\s+"([^"]+)"\).*?\(uri\s+"([^"]+)"\)', re.S)
-# A symbol's Value followed (within the same instance block) by its Datasheet property.
-# Value precedes Datasheet in each KiCad symbol block, and the non-greedy gap stops at
-# the FIRST Datasheet after the Value, so the two pair up per symbol.
-_VALUE_DATASHEET = re.compile(
-    r'\(property\s+"Value"\s+"([^"]*)".*?\(property\s+"Datasheet"\s+"([^"]*)"', re.S)
+from . import sexp
+
+# A real instance designator: letters+digits (R1, U5, RV1). Excludes the `lib_symbols`
+# templates ("R", "C"), power/virtual `#PWR`, and `REF**` placeholders.
+_DESIGNATOR = re.compile(r"^[A-Za-z]+\d+$")
+
+
+def _load(path: str | Path):
+    return sexp.load(Path(path).read_text())
+
+
+def _sym_props(symbol) -> dict[str, str]:
+    """A symbol's own `(property "Name" "Value")` children as {name: value} — first
+    occurrence wins, matching the instance's own value over any inherited default."""
+    props: dict[str, str] = {}
+    for p in sexp.children(symbol, "property"):
+        if len(p) >= 3:
+            props.setdefault(sexp.sym(p[1]), sexp.sym(p[2]))
+    return props
 
 
 def input_hier_nets(sch: str | Path) -> set[str]:
     """Net names with a hierarchical INPUT/bidirectional label on this sheet —
     their driver lives in the not-yet-connected parent (partial-build artifact)."""
-    text = Path(sch).read_text()
     nets: set[str] = set()
-    for m in _HIER_LABEL.finditer(text):
-        name, body = m.group(1), m.group(2)
-        sm = _SHAPE.search(body)
-        if sm and sm.group(1) in ("input", "bidirectional"):
-            nets.add(name.lstrip("/"))
+    for lbl in sexp.walk(_load(sch), "hierarchical_label"):
+        shape = sexp.first(lbl, "shape")
+        if len(lbl) >= 2 and shape and len(shape) >= 2 and sexp.sym(shape[1]) in ("input", "bidirectional"):
+            nets.add(sexp.sym(lbl[1]).lstrip("/"))
     return nets
 
 
@@ -40,11 +48,12 @@ def footprint_refs(sheets: list[Path]) -> dict[str, set[str]]:
     refs: dict[str, set[str]] = {}
     for sheet in sheets:
         try:
-            text = sheet.read_text()
+            root = _load(sheet)
         except (OSError, UnicodeDecodeError):
             continue
-        for fp in _FOOTPRINT.findall(text):
-            if fp.strip():
+        for symbol in sexp.walk(root, "symbol"):
+            fp = _sym_props(symbol).get("Footprint", "").strip()
+            if fp:
                 refs.setdefault(fp, set()).add(sheet.name)
     return refs
 
@@ -52,41 +61,38 @@ def footprint_refs(sheets: list[Path]) -> dict[str, set[str]]:
 def datasheet_fields(sheets: list[Path]) -> dict[str, str]:
     """Map each symbol's Value -> its Datasheet URL across the given sheets.
 
-    Best-effort, in the same regex style as `footprint_refs`. Only keeps entries whose
-    Datasheet field is an actual URL (contains "://"), which drops the `~`/empty
-    placeholders on lib_symbols templates and on parts with no datasheet set. First
-    URL seen for a Value wins.
+    Only entries whose Datasheet is a real URL (contains "://") are kept, which drops the
+    `~`/empty placeholders on `lib_symbols` templates and on parts with no datasheet set.
+    First URL seen for a Value wins. Reading Value and Datasheet from the SAME symbol node
+    avoids the cross-symbol mispairing a positional regex could produce.
     """
     out: dict[str, str] = {}
     for sheet in sheets:
         try:
-            text = sheet.read_text()
+            root = _load(sheet)
         except (OSError, UnicodeDecodeError):
             continue
-        for val, ds in _VALUE_DATASHEET.findall(text):
-            ds = ds.strip()
-            val = val.strip()
+        for symbol in sexp.walk(root, "symbol"):
+            props = _sym_props(symbol)
+            val, ds = props.get("Value", "").strip(), props.get("Datasheet", "").strip()
             if val and "://" in ds:
                 out.setdefault(val, ds)
     return out
 
 
-_DESIGNATOR = re.compile(r"^[A-Za-z]+\d+$")
-
-
 def references(sch: str | Path) -> list[str]:
-    """Instance reference designators on a sheet (e.g. C45, U5, RV1).
+    """Instance reference designators on a sheet (e.g. C45, U5, RV1), in document order.
 
-    Filters out the `lib_symbols` template references ("C", "R", "U" with no
-    number), power/virtual `#PWR` refs, and `REF**` placeholders — only real
-    designators (letters followed by digits) are returned.
+    Filters out the `lib_symbols` template references ("C", "R", "U" with no number),
+    power/virtual `#PWR` refs, and `REF**` placeholders — only real designators
+    (letters followed by digits) are returned.
     """
-    text = Path(sch).read_text()
-    return [ref for ref in _REFERENCE.findall(text) if _DESIGNATOR.match(ref)]
-
-
-_PROPERTY = re.compile(r'\(property\s+"([^"]+)"\s+"([^"]*)"')
-_SYMBOL_SPLIT = re.compile(r'\n\s*\(symbol\b')
+    out: list[str] = []
+    for symbol in sexp.walk(_load(sch), "symbol"):
+        ref = _sym_props(symbol).get("Reference", "")
+        if _DESIGNATOR.match(ref):
+            out.append(ref)
+    return out
 
 
 def components(sch: str | Path,
@@ -98,14 +104,11 @@ def components(sch: str | Path,
     `#`-prefixed symbols are dropped, same as `references()`. `mpn` is the first
     non-empty value among `mpn_keys` (KiCad's `Datasheet`/`Footprint` etc. are ignored).
 
-    Read-only text parse — needs no kicad-cli.
+    Read-only structural parse — needs no kicad-cli.
     """
-    text = Path(sch).read_text()
     out: list[dict] = []
-    for block in _SYMBOL_SPLIT.split(text)[1:]:
-        props: dict[str, str] = {}
-        for key, val in _PROPERTY.findall(block):
-            props.setdefault(key, val)          # first (the instance's own) wins
+    for symbol in sexp.walk(_load(sch), "symbol"):
+        props = _sym_props(symbol)
         ref = props.get("Reference", "")
         if not _DESIGNATOR.match(ref):
             continue
@@ -123,8 +126,8 @@ def parse_fp_lib_table(table: Path, kiprjmod: Path) -> dict[str, Path]:
     libs: dict[str, Path] = {}
     if not table.exists():
         return libs
-    for m in _LIB_ENTRY.finditer(table.read_text()):
-        nick, uri = m.group(1), m.group(2)
-        uri = uri.replace("${KIPRJMOD}", str(kiprjmod))
-        libs[nick] = Path(uri)
+    for lib in sexp.walk(sexp.load(table.read_text()), "lib"):
+        name, uri = sexp.first(lib, "name"), sexp.first(lib, "uri")
+        if name and len(name) >= 2 and uri and len(uri) >= 2:
+            libs[sexp.sym(name[1])] = Path(sexp.sym(uri[1]).replace("${KIPRJMOD}", str(kiprjmod)))
     return libs

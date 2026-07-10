@@ -45,6 +45,28 @@ def test_parse_counts_and_net_forms(tmp_path):
     assert b.footprints == {"R1": "lib:R"}
 
 
+# A multi-layer zone: its own `(layers …)` spans two layers, but each `filled_polygon`
+# child names a single layer. A flat regex `.search` grabbed the first *nested* layer and
+# under-reported the zone as single-layer; the structural parse reads the zone's own
+# `(layers …)`. Regression guard for that fix.
+MULTI_ZONE = """\
+(kicad_pcb (version 20260206) (generator "pcbnew")
+  (net 0 "")
+  (net 1 "GND")
+  (zone (net 1) (net_name "GND") (layers "In1.Cu" "In2.Cu")
+    (filled_polygon (layer "In1.Cu") (pts))
+    (filled_polygon (layer "In2.Cu") (pts)))
+)
+"""
+
+
+def test_multilayer_zone_reads_own_layers(tmp_path):
+    z = parse(tmp_path, MULTI_ZONE).zones
+    assert len(z) == 1
+    assert z[0].net == "GND"                       # (net 1) resolved via the net table
+    assert z[0].layers == ("In1.Cu", "In2.Cu")     # both layers, not just the first nested one
+
+
 def test_net_length_and_width_stats(tmp_path):
     b = parse(tmp_path)
     assert math.isclose(b.net_length("/sig/A"), 2.0, abs_tol=1e-6)
