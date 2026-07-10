@@ -145,14 +145,15 @@ def test_bom_entries_finds_mpn_column():
 def test_datasheet_fields_pairs_value_to_url(tmp_path):
     sch = tmp_path / "b.kicad_sch"
     sch.write_text("""
-(symbol (lib_id "x:R")
-  (property "Reference" "R1" (id 0))
-  (property "Value" "10k" (id 1))
-  (property "Datasheet" "~" (id 3)))
-(symbol (lib_id "x:U")
-  (property "Reference" "U1" (id 0))
-  (property "Value" "TPS65150" (id 1))
-  (property "Datasheet" "https://ti.com/tps65150.pdf" (id 3)))
+(kicad_sch
+  (symbol (lib_id "x:R")
+    (property "Reference" "R1" (id 0))
+    (property "Value" "10k" (id 1))
+    (property "Datasheet" "~" (id 3)))
+  (symbol (lib_id "x:U")
+    (property "Reference" "U1" (id 0))
+    (property "Value" "TPS65150" (id 1))
+    (property "Datasheet" "https://ti.com/tps65150.pdf" (id 3))))
 """)
     fields = schparse.datasheet_fields([sch])
     assert fields == {"TPS65150": "https://ti.com/tps65150.pdf"}   # "~" placeholder dropped
