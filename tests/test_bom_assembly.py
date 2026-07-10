@@ -6,13 +6,23 @@ the placement parse; a small openpyxl workbook drives the BOM read.
 """
 import xml.dom.minidom as minidom
 
-import openpyxl
 import pytest
 
 from kicad_bench import bom_assembly as ba
 from kicad_bench.core import pcbgeom
 from kicad_bench.core.config import Config
 from kicad_bench.core.pcbgeom import PadGeom, Placement
+
+# openpyxl is an OPTIONAL dependency: _read_bom imports it lazily and degrades to an empty
+# BOM when it's absent (the core stays stdlib-only). The xlsx-backed tests skip in kind, so
+# the pure-logic tests still run everywhere.
+try:
+    import openpyxl
+    HAVE_OPENPYXL = True
+except ModuleNotFoundError:
+    HAVE_OPENPYXL = False
+
+needs_openpyxl = pytest.mark.skipif(not HAVE_OPENPYXL, reason="openpyxl not installed (optional BOM-xlsx dep)")
 
 
 # ── pcbgeom placement extension ───────────────────────────────────────────────
@@ -214,6 +224,7 @@ def _cfg(tmp_path):
                   pcb=tmp_path / "b.kicad_pcb", bom=bom, root_sch=None)
 
 
+@needs_openpyxl
 def test_build_joins_and_flags(tmp_path):
     data = ba.build(_cfg(tmp_path))
     rows = {r["value"]: r for r in data["rows"]}
@@ -226,6 +237,7 @@ def test_build_joins_and_flags(tmp_path):
     assert not rows["10k"]["orientation_sensitive"]
 
 
+@needs_openpyxl
 def test_build_surfaces_bom_vs_pcb_value_mismatch(tmp_path):
     (tmp_path / "b.kicad_pcb").write_text(PCB)
     bom = tmp_path / "bom.xlsx"
@@ -236,6 +248,7 @@ def test_build_surfaces_bom_vs_pcb_value_mismatch(tmp_path):
     assert data["summary"]["value_mismatches"] == 1
 
 
+@needs_openpyxl
 def test_export_csv_has_alternates_column(tmp_path):
     cfg = _cfg(tmp_path)
     ba.write_alternates(tmp_path, ba.group_key("USBLC6-2SC6", "SOT23-6"),

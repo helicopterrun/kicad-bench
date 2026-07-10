@@ -12,7 +12,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install (stdlib-only core; no kicad-cli needed for the unit tests)
-        run: pip install -e . pytest
+      - name: Install (stdlib-only core; pytest + openpyxl for the optional BOM-xlsx tests)
+        run: pip install -e . pytest openpyxl
       - name: Run tests
         run: pytest -q
