@@ -131,3 +131,20 @@ def parse_fp_lib_table(table: Path, kiprjmod: Path) -> dict[str, Path]:
         if name and len(name) >= 2 and uri and len(uri) >= 2:
             libs[sexp.sym(name[1])] = Path(sexp.sym(uri[1]).replace("${KIPRJMOD}", str(kiprjmod)))
     return libs
+
+
+def lib_nicknames(text: str) -> list[str]:
+    """The `(lib (name "<nick>") … (uri …))` nicknames declared in a sym-/fp-lib-table's
+    text, in document order (empty on a partial/invalid table). A stable public entry point
+    for tooling that reports which libraries a table already registers — kept public
+    precisely so consumers don't reach into this module's regex internals."""
+    try:
+        root = sexp.load(text)
+    except Exception:  # noqa: BLE001 — an incomplete table simply has no complete entries
+        return []
+    out: list[str] = []
+    for lib in sexp.walk(root, "lib"):
+        name, uri = sexp.first(lib, "name"), sexp.first(lib, "uri")
+        if name and len(name) >= 2 and uri and len(uri) >= 2:
+            out.append(sexp.sym(name[1]))
+    return out

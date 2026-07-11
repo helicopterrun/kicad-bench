@@ -214,6 +214,15 @@ def test_references_filters_templates(tmp_path):
     assert set(schparse.references(sch)) == {"C45", "U5", "RV1"}
 
 
+def test_lib_nicknames():
+    table = ('(fp_lib_table (version 7)\n'
+             '  (lib (name "House")(type "KiCad")(uri "${KIPRJMOD}/House.pretty")(options "")(descr ""))\n'
+             '  (lib (name "0_External")(type "KiCad")(uri "${KIPRJMOD}/0_External.pretty")(options "")(descr "")))')
+    assert schparse.lib_nicknames(table) == ["House", "0_External"]
+    assert schparse.lib_nicknames("") == []                 # partial/invalid table → no entries
+    assert schparse.lib_nicknames("(fp_lib_table (version 7))") == []
+
+
 def test_input_hier_nets(tmp_path):
     sch = write(tmp_path, "x.kicad_sch", """
 (kicad_sch
