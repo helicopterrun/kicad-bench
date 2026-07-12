@@ -122,6 +122,15 @@ def test_orientation_sensitive_prefixes():
     assert not ba._orientation_sensitive("R10") and not ba._orientation_sensitive("C4")
 
 
+def test_part_type_from_designator_prefix():
+    assert ba._part_type(["R70"]) == "Resistor" and ba._part_type(["C100"]) == "Capacitor"
+    assert ba._part_type(["D3"]) == "Diode" and ba._part_type(["U1"]) == "IC"
+    assert ba._part_type(["FB2"]) == "Ferrite bead" and ba._part_type(["LED4"]) == "LED"
+    assert ba._part_type(["ESD1"]) == "ESD array"        # multi-letter prefix, exact match
+    assert ba._part_type(["LD9"]) == "Inductor"          # unlisted 'LD' trims to 'L'
+    assert ba._part_type(["ZZ9"]) == "" and ba._part_type(["123"]) == ""
+
+
 # ── orient_svg ────────────────────────────────────────────────────────────────
 def _pl(side, rot=0.0):
     return Placement(ref="U1", fpid="lib:U", x=0, y=0, rot=rot, side=side, value="x",
