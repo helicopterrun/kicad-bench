@@ -18,6 +18,7 @@ Discipline preserved from the original:
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -40,6 +41,7 @@ class BoardState:
         self.cache_mtime = None
         self._audit_running = False        # background audit in flight?
         self._audit_error: str | None = None
+        self._audit_hydrated = False       # loaded the disk-persisted result yet?
         self.sch_cache: bytes | None = None
         self.sch_cache_mtime = None
         # 2D PCB preview (fast, synchronous, board-mtime cached) — keyed by side
@@ -69,51 +71,88 @@ class BoardState:
     def _compute_audit(self) -> dict:
         return audit.sections_to_dict(audit.run_all(self.cfg), self.cfg)
 
+    def _audit_sig(self) -> list:
+        """What the audit is cached against: [pcb mtime, newest sch mtime]. DRC reads the
+        PCB and ERC the schematic, so a change to either makes the result stale."""
+        return [self._mtime(), self.sch_mtime()]
+
+    def _audit_disk(self) -> Path:
+        return self.cfg.root / ".audit-cache" / "result.json"
+
+    def _hydrate_audit(self):
+        """Load the last persisted audit into memory once, so a PASS/FAIL survives a
+        restart (shown 'stale' if the board changed since). Call under the lock."""
+        if self._audit_hydrated:
+            return
+        self._audit_hydrated = True
+        if self.cache is not None:
+            return
+        try:
+            rec = json.loads(self._audit_disk().read_text())
+        except (OSError, ValueError):
+            return
+        if isinstance(rec, dict) and rec.get("data") is not None:
+            self.cache, self.cache_mtime = rec["data"], rec.get("sig")
+
+    def _save_audit(self, sig, data):
+        """Persist the result (gitignored, regenerable) so it survives a restart."""
+        d = self._audit_disk().parent
+        try:
+            if not d.exists():
+                d.mkdir(parents=True, exist_ok=True)
+                (d / ".gitignore").write_text("*\n")     # never committed
+            tmp = d / "result.json.tmp"
+            tmp.write_text(json.dumps({"sig": sig, "data": data}))
+            tmp.replace(self._audit_disk())
+        except OSError:
+            pass
+
     def audit(self, force: bool) -> dict:
         """Blocking audit. Runs kicad-cli DRC/ERC OUTSIDE the lock so a ~19s audit never
         stalls other requests that need the board state."""
-        m = self._mtime()
+        sig = self._audit_sig()
         with self.lock:
-            if not force and self.cache is not None and self.cache_mtime == m:
+            self._hydrate_audit()
+            if not force and self.cache is not None and self.cache_mtime == sig:
                 return self.cache
         data = self._compute_audit()
         with self.lock:
-            self.cache, self.cache_mtime = data, m
+            self.cache, self.cache_mtime = data, sig
+        self._save_audit(sig, data)
         return data
 
     def audit_peek(self) -> dict:
         """Report the last audit WITHOUT triggering a run — for on-demand auditing, so a
         page load never spawns kicad-cli. status: ready | stale | running | error | none.
         'stale' means the board changed since the cached result (offer a re-run)."""
-        m = self._mtime()
+        sig = self._audit_sig()
         with self.lock:
+            self._hydrate_audit()
             if self._audit_running:
-                return {"status": "running", "mtime": m}
+                return {"status": "running"}
             if self.cache is not None:
-                fresh = self.cache_mtime == m
+                fresh = self.cache_mtime == sig
                 return {"status": "ready" if fresh else "stale", "stale": not fresh, **self.cache}
             if self._audit_error is not None:
-                return {"status": "error", "mtime": m, "error": self._audit_error}
-            return {"status": "none", "mtime": m}
+                return {"status": "error", "error": self._audit_error}
+            return {"status": "none"}
 
     def audit_state(self, force: bool = False) -> dict:
-        """Non-blocking audit: returns the cached result if fresh, else kicks off a
-        background run and reports {status:'running'} so the page never blocks on kicad-cli
-        (mirrors pcb_3d_state). status: ready | running | error."""
-        m = self._mtime()
+        """Kick off the audit on a background daemon thread (mirrors pcb_3d_state) and
+        report {status:'running'}; the client polls audit_peek until it flips to ready."""
+        sig = self._audit_sig()
         with self.lock:
-            if not force and self.cache is not None and self.cache_mtime == m:
+            self._hydrate_audit()
+            if not force and self.cache is not None and self.cache_mtime == sig:
                 return {"status": "ready", **self.cache}
             if self._audit_running:
-                return {"status": "running", "mtime": m}
-            if self._audit_error is not None and self.cache_mtime == m and not force:
-                return {"status": "error", "mtime": m, "error": self._audit_error}
+                return {"status": "running"}
             self._audit_running = True
             self._audit_error = None
-        threading.Thread(target=self._audit_bg, args=(m,), daemon=True).start()
-        return {"status": "running", "mtime": m}
+        threading.Thread(target=self._audit_bg, args=(sig,), daemon=True).start()
+        return {"status": "running"}
 
-    def _audit_bg(self, m):
+    def _audit_bg(self, sig):
         err = data = None
         try:
             data = self._compute_audit()
@@ -121,10 +160,12 @@ class BoardState:
             err = str(e)
         with self.lock:
             if data is not None:
-                self.cache, self.cache_mtime, self._audit_error = data, m, None
+                self.cache, self.cache_mtime, self._audit_error = data, sig, None
             else:
-                self.cache_mtime, self._audit_error = m, err
+                self._audit_error = err
             self._audit_running = False
+        if data is not None:
+            self._save_audit(sig, data)      # outside the lock — disk IO
 
     def sch_mtime(self):
         """Newest mtime across all sheets, so editing ANY child sheet invalidates the
