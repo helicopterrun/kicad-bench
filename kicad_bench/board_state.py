@@ -81,6 +81,21 @@ class BoardState:
             self.cache, self.cache_mtime = data, m
         return data
 
+    def audit_peek(self) -> dict:
+        """Report the last audit WITHOUT triggering a run — for on-demand auditing, so a
+        page load never spawns kicad-cli. status: ready | stale | running | error | none.
+        'stale' means the board changed since the cached result (offer a re-run)."""
+        m = self._mtime()
+        with self.lock:
+            if self._audit_running:
+                return {"status": "running", "mtime": m}
+            if self.cache is not None:
+                fresh = self.cache_mtime == m
+                return {"status": "ready" if fresh else "stale", "stale": not fresh, **self.cache}
+            if self._audit_error is not None:
+                return {"status": "error", "mtime": m, "error": self._audit_error}
+            return {"status": "none", "mtime": m}
+
     def audit_state(self, force: bool = False) -> dict:
         """Non-blocking audit: returns the cached result if fresh, else kicks off a
         background run and reports {status:'running'} so the page never blocks on kicad-cli
