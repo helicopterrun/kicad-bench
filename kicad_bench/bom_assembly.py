@@ -358,6 +358,37 @@ def _orientation_sensitive(ref: str) -> bool:
     return bool(m and m.group(0).upper() in _ORIENT_PREFIXES)
 
 
+# Reference-designator prefix → human part type, for a quick "what is this" label per line.
+# Longer prefixes are matched first (FB before F, LED before L), then trimmed a letter at a
+# time, so an unlisted multi-letter prefix falls back to its base class.
+_TYPE_BY_PREFIX = {
+    "R": "Resistor", "RN": "Resistor array", "RV": "Varistor", "RT": "Thermistor",
+    "C": "Capacitor", "L": "Inductor", "FB": "Ferrite bead",
+    "D": "Diode", "LED": "LED", "ZD": "Zener",
+    "Q": "Transistor", "U": "IC", "IC": "IC", "ESD": "ESD array",
+    "Y": "Crystal", "X": "Crystal", "XTAL": "Crystal", "OSC": "Oscillator",
+    "J": "Connector", "P": "Connector", "CN": "Connector", "CON": "Connector",
+    "SW": "Switch", "K": "Relay", "T": "Transformer", "F": "Fuse", "FL": "Filter",
+    "BT": "Battery", "BAT": "Battery", "TP": "Test point", "M": "Module",
+    "MK": "Microphone", "LS": "Speaker", "B": "Buzzer", "AE": "Antenna", "ANT": "Antenna",
+}
+
+
+def _part_type(refs: list[str]) -> str:
+    """A human part type from the designator prefix (R→Resistor, D→Diode, U→IC). '' if the
+    prefix isn't recognised."""
+    for ref in refs:
+        m = re.match(r"[A-Za-z]+", ref or "")
+        if not m:
+            continue
+        p = m.group(0).upper()
+        while p:
+            if p in _TYPE_BY_PREFIX:
+                return _TYPE_BY_PREFIX[p]
+            p = p[:-1]
+    return ""
+
+
 # ── the assembly ──────────────────────────────────────────────────────────────
 def build(cfg: Config) -> dict:
     """Assemble the grouped, cross-checked BOM for a board. Returns
@@ -419,6 +450,7 @@ def build(cfg: Config) -> dict:
         rows.append({
             **g,
             "qty": len(desigs),
+            "type": _part_type([d["ref"] for d in desigs]),
             "value_check": roll,
             "sch_pcb_mismatch": any(d["value_check"]["sch_pcb_mismatch"] for d in desigs),
             "orientation_sensitive": any(d["orientation_sensitive"] for d in desigs),
