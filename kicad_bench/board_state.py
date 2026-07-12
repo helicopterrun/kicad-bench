@@ -38,6 +38,8 @@ class BoardState:
         self.lock = threading.Lock()
         self.cache: dict | None = None
         self.cache_mtime = None
+        self._audit_running = False        # background audit in flight?
+        self._audit_error: str | None = None
         self.sch_cache: bytes | None = None
         self.sch_cache_mtime = None
         # 2D PCB preview (fast, synchronous, board-mtime cached) — keyed by side
@@ -64,14 +66,50 @@ class BoardState:
         p = self.cfg.pcb
         return p.stat().st_mtime if p and p.exists() else 0
 
+    def _compute_audit(self) -> dict:
+        return audit.sections_to_dict(audit.run_all(self.cfg), self.cfg)
+
     def audit(self, force: bool) -> dict:
+        """Blocking audit. Runs kicad-cli DRC/ERC OUTSIDE the lock so a ~19s audit never
+        stalls other requests that need the board state."""
+        m = self._mtime()
         with self.lock:
-            m = self._mtime()
             if not force and self.cache is not None and self.cache_mtime == m:
                 return self.cache
-            data = audit.sections_to_dict(audit.run_all(self.cfg), self.cfg)
+        data = self._compute_audit()
+        with self.lock:
             self.cache, self.cache_mtime = data, m
-            return data
+        return data
+
+    def audit_state(self, force: bool = False) -> dict:
+        """Non-blocking audit: returns the cached result if fresh, else kicks off a
+        background run and reports {status:'running'} so the page never blocks on kicad-cli
+        (mirrors pcb_3d_state). status: ready | running | error."""
+        m = self._mtime()
+        with self.lock:
+            if not force and self.cache is not None and self.cache_mtime == m:
+                return {"status": "ready", **self.cache}
+            if self._audit_running:
+                return {"status": "running", "mtime": m}
+            if self._audit_error is not None and self.cache_mtime == m and not force:
+                return {"status": "error", "mtime": m, "error": self._audit_error}
+            self._audit_running = True
+            self._audit_error = None
+        threading.Thread(target=self._audit_bg, args=(m,), daemon=True).start()
+        return {"status": "running", "mtime": m}
+
+    def _audit_bg(self, m):
+        err = data = None
+        try:
+            data = self._compute_audit()
+        except Exception as e:  # noqa: BLE001 — surface the failure, never crash the thread
+            err = str(e)
+        with self.lock:
+            if data is not None:
+                self.cache, self.cache_mtime, self._audit_error = data, m, None
+            else:
+                self.cache_mtime, self._audit_error = m, err
+            self._audit_running = False
 
     def sch_mtime(self):
         """Newest mtime across all sheets, so editing ANY child sheet invalidates the
