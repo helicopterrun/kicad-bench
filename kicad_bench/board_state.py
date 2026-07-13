@@ -23,6 +23,7 @@ import os
 import re
 import shutil
 import threading
+import time
 from pathlib import Path
 
 from .core import cli
@@ -166,6 +167,42 @@ class BoardState:
             self._audit_running = False
         if data is not None:
             self._save_audit(sig, data)      # outside the lock — disk IO
+
+    def changes(self) -> dict:
+        """Recent design history for the sidecar Changes tab: the project's last
+        git commits plus the most recent `ksir compile` netlist diff (written to
+        <repo>/output/ksir_last_diff.txt). Lets the human see WHAT the assistant
+        changed semantically, not just a refreshed picture."""
+        import subprocess
+        base = (self.cfg.root_sch or self.cfg.pcb)
+        if not base:
+            return {"commits": [], "last_diff": ""}
+        wd = str(base.parent)
+        commits: list[dict] = []
+        try:
+            r = subprocess.run(
+                ["git", "log", "-15", "--pretty=%h%x00%cr%x00%s"],
+                capture_output=True, text=True, cwd=wd, timeout=10)
+            for line in r.stdout.splitlines():
+                parts = line.split("\x00")
+                if len(parts) == 3:
+                    commits.append({"hash": parts[0], "when": parts[1],
+                                    "subject": parts[2]})
+        except Exception:  # noqa: BLE001 — the tab must never break the dashboard
+            pass
+        last_diff = ""
+        try:
+            r = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                               capture_output=True, text=True, cwd=wd, timeout=10)
+            top = Path(r.stdout.strip()) if r.returncode == 0 else base.parent
+            f = top / "output" / "ksir_last_diff.txt"
+            if f.exists():
+                age = time.time() - f.stat().st_mtime
+                last_diff = f.read_text()[:20000]
+                last_diff = f"# written {int(age // 60)} min ago\n{last_diff}"
+        except Exception:  # noqa: BLE001
+            pass
+        return {"commits": commits, "last_diff": last_diff}
 
     def sch_mtime(self):
         """Newest mtime across all sheets, so editing ANY child sheet invalidates the

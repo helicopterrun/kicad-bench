@@ -188,6 +188,7 @@ function switchTab(kind,i,btn){
   else if(kind==="pcb3d") src="/preview/pcb3d?t="+Date.now();
   else if(kind==="parts") src="/preview/parts?t="+Date.now();
   else if(kind==="datasheets") src="/preview/datasheets?t="+Date.now();
+  else if(kind==="changes") src="/preview/changes?t="+Date.now();
   else src="/doc/"+i;
   if(docSrc!==src){ f.src=src; docSrc=src; } f.style.display="block"; sizeFrame();
 }
@@ -216,6 +217,7 @@ async function loadTabs(){
   mk("PCB 3D","pcb3d",null);
   mk("Parts","parts",null);
   mk("Datasheets","datasheets",null);
+  mk("Changes","changes",null);
   if(tabs.length){               // doc guides go behind a hamburger so the bar never overflows
     const dd=document.createElement("span"); dd.className="tdd";
     const ham=document.createElement("button"); ham.id="moretab"; ham.textContent="☰"; ham.title="More tabs";
@@ -410,6 +412,46 @@ tick(); setInterval(tick,2000);
 # so this wrapper gives an "Open in PDF viewer" link that loads the PDF as a top-level
 # tab — the native viewer, with full pinch-zoom/pan/pages on iPad and desktop alike — and
 # keeps an inline embed for desktop. It re-points both at the fresh PDF when a sheet saves.
+# "Changes" tab — recent git history + the last ksir compile's netlist diff, so a
+# human sees what the assistant changed SEMANTICALLY (net deltas), not just a new
+# render. Polls every 5s; read-only.
+CHANGES_PAGE = """<!doctype html><html><head><meta charset="utf-8"><style>
+ html,body{margin:0;background:#1b1c1f;color:#d4d7dd;
+   font:13px/1.6 ui-monospace,Menlo,Consolas,monospace;padding:14px 18px}
+ h2{font-size:13px;color:#8a8f98;text-transform:uppercase;letter-spacing:.08em;margin:18px 0 8px}
+ .c{display:flex;gap:10px;padding:3px 0;border-bottom:1px solid #232428}
+ .h{color:#7fa8d8;min-width:70px}.w{color:#8a8f98;min-width:110px}
+ pre{background:#141518;border:1px solid #2b2d31;border-radius:8px;padding:12px;
+   overflow:auto;white-space:pre-wrap}
+ pre .add{color:#7ec699}pre .del{color:#e08787}pre .ren{color:#d8b87f}
+ .empty{color:#8a8f98}
+</style></head><body>
+<h2>Last ksir compile — netlist delta</h2><pre id="diff" class="empty">loading…</pre>
+<h2>Recent commits</h2><div id="log" class="empty">loading…</div>
+<script>
+function esc(s){return s.replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));}
+async function tick(){
+  if(document.hidden) return;
+  let d; try{ d=await (await fetch('/api/changes')).json(); }catch(e){ return; }
+  const pre=document.getElementById('diff');
+  if(d.last_diff){
+    pre.classList.remove('empty');
+    pre.innerHTML=d.last_diff.split('\\n').map(l=>{
+      const cls=l.startsWith('+')?'add':l.startsWith('-')?'del':l.startsWith('~')?'ren':'';
+      return cls?('<span class="'+cls+'">'+esc(l)+'</span>'):esc(l);
+    }).join('\\n');
+  } else pre.textContent='no ksir compile diff recorded yet';
+  const log=document.getElementById('log');
+  if(d.commits && d.commits.length){
+    log.classList.remove('empty');
+    log.innerHTML=d.commits.map(c=>'<div class="c"><span class="h">'+esc(c.hash)+
+      '</span><span class="w">'+esc(c.when)+'</span><span>'+esc(c.subject)+'</span></div>').join('');
+  } else log.textContent='no git history found';
+}
+tick(); setInterval(tick,5000);
+</script></body></html>"""
+
+
 SCHEMATIC_PAGE = """<!doctype html><html><head><meta charset="utf-8"><style>
  html,body{margin:0;height:100%;background:#1b1c1f;color:#d4d7dd;
    font:13px/1.5 ui-monospace,Menlo,Consolas,monospace;display:flex;flex-direction:column}
@@ -789,6 +831,11 @@ def _make_handler(state: _State):
                 self._send(200, json.dumps(tabs).encode(), "application/json")
             elif path == "/api/preview/sch.mtime":
                 self._send(200, json.dumps({"mtime": state.sch_mtime()}).encode(),
+                           "application/json")
+            elif path == "/preview/changes":
+                self._send(200, CHANGES_PAGE.encode(), "text/html; charset=utf-8")
+            elif path == "/api/changes":
+                self._send(200, json.dumps(state.changes()).encode(),
                            "application/json")
             elif path == "/preview/schematic":
                 self._send(200, SCHEMATIC_PAGE.encode(), "text/html; charset=utf-8")
