@@ -14,7 +14,7 @@ from . import __version__, audit, datasheet, release_freeze, sch_live, scaffold,
 from . import init as init_cmd
 from .core import cli
 from .quality import (approved_parts, block_review, commit_gate, erc_triage,
-                      netlist_audit, symbol_style, sch_readability)
+                      ksir_sync, netlist_audit, symbol_style, sch_readability)
 from .layout import (dfm_preflight, diffpair_audit, dru_guard, dru_lint,
                      netclass_coverage, netclass_sync, release_prep,
                      route_coverage, stackup_sync, track_conformance)
@@ -25,6 +25,7 @@ _TOOLS = [
     audit, sidecar, stage, datasheet,                            # consolidated audit + live web sidecar + lock-aware queue + datasheet viewer
     sch_live,                                                    # live schematic summary over the IPC API (shells to kb-ipc add-on)
     erc_triage, netlist_audit, block_review, approved_parts, commit_gate,  # Priority 1
+    ksir_sync,                                                   # .ksir <-> sheet drift gate
     symbol_style, sch_readability,                               # library + sheet layout rule gates
     netclass_coverage, netclass_sync, dfm_preflight, stackup_sync,  # Priority 2
     release_prep, dru_lint,
