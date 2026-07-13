@@ -10,7 +10,7 @@ tool that matches the job, and prefer KiCad's own interfaces over hand-parsing f
 |---|---|---|
 | Run ERC / DRC / netlist / export gerbers / **render a sheet or board to SVG/PDF/PNG** | **`kicad-cli`** | Headless, both editors, always current. The **only** export/plot path (IPC can't export in 9/10). |
 | Read or **edit the live PCB** without reopening it | **IPC API (kipy)** via `kicad-ipc-plugin/` | Talks to the running pcbnew; edits process like user input → appear live. **PCB only.** |
-| Build / regenerate a **schematic** sheet headlessly | **kicad-sch-api** (file write) | No schematic IPC in v10 — file editing is the *only* eeschema automation path. |
+| Build / **edit** a **schematic** sheet headlessly | **ksir** (`ksir compile/adopt`, `/Users/christopher/products/ksir/`) | The sheet's `.ksir` YAML is the edit surface; compiles deterministically to `.kicad_sch` (kicad-sch-api is an internal detail). Netlist-diff gate on every compile; `kb ksir-sync` catches drift. |
 | A **deterministic pass/fail gate** (ERC triage, netlist, DRC, diff-pairs, release) | **`kb`** (kicad-bench) | Config-driven, exit-coded, CI/hook-friendly; the live sidecar dashboard. |
 | A **judgement-style review** (EMC, DfM, datasheet sanity, SPICE) | **`kicad-happy`** plugin | LLM analysis + narrative report — not a binary gate. |
 | Capture / place a **reusable subcircuit** | **Native design blocks** | `.kicad_sch` + hier-label ports in a registered `.kicad_dblib_tbl`. |
@@ -41,7 +41,20 @@ hand-roll KiCad's wire format. For any RPC surface we define around it: stable f
 tags (never reuse a number), enum tag-0 = `*_UNSPECIFIED`, fields optional, binary
 (not text) interchange, and never depend on serialization stability across builds.
 
-### 3. kicad-sch-api — schematic codegen (file-based)
+### 3. ksir — schematic codegen & round-trip editing (file-based)
+
+Because there is **no eeschema IPC**, schematic automation is file-based — and the
+file the assistant edits is the sheet's **`.ksir`** (YAML: symbols by refdes, nets
+by name), never raw s-expressions. `ksir compile` regenerates the `.kicad_sch`
+(all KiCad-10 gotchas handled internally, incl. the ksa version markers and the
+rot-90 pin bug) and prints a canonical-netlist diff that must match the intended
+edit exactly. `ksir adopt` round-trips an existing/hand-edited sheet into a .ksir
+with geometry, field styling, symbol/file uuids and `(instances)` paths preserved
+(refuses unless netlist-identical). Drift gate: `kb ksir-sync`. kicad-sch-api
+remains the underlying writer, wrapped by ksir — the notes below still apply to
+any direct use of it:
+
+### 3b. kicad-sch-api — the underlying writer (direct use discouraged)
 Because there is **no eeschema IPC**, schematic automation means writing `.kicad_sch`
 files (kicad-sch-api / the `build_*_sheet.py` generators on `sheetgen.py`). Two standing
 hazards: it emits KiCad-9 format that KiCad 10 silently wipes → must post-patch to
