@@ -19,13 +19,24 @@ change is a one-line edit and every figure carries a `source_url` + date.
   user actually uses are not the same kind of service (see §2).
 - A per-vendor **comparison table** at a chosen quantity, plus a per-vendor cost breakdown.
 - Re-costing on a **stackup/layer/finish** change (2-layer vs 4-layer respin, 1oz vs 2oz, …).
+- **Landed cost** — board/assembly **+ shipping + customs/duties + sales tax − discounts**.
+  Real orders (§11) prove this is mandatory, not optional: a $2.00 JLC flex board landed at
+  **$48.96** (shipping alone $41.65), and a $325.77 JLC merch order landed at **$500.50**
+  (customs duties $107.10). Reporting only the board price would understate a China→US order
+  by 10–25×. These lines are **clearly-labeled estimates** with their own confidence, never
+  presented as exact — but they are *in* scope.
 
-**Explicitly out of scope (v1)** — these are the fuzzy parts; we label them rather than fake them:
-- **Shipping** — hugely variable (courier, destination, weight, consolidation). Shown as a
-  separate, clearly-estimated or excluded line, never folded into the board price.
-- **Tariffs / duties** — destination-dependent; out.
-- **Promos / coupons** — JLC's "$2 / free-assembly-coupon" churn constantly. We cost the
-  *list* price and note where a standing promo usually applies.
+**Still fuzzy / labeled, not faked**
+- **Shipping** — varies by courier/destination/weight, but is *estimated*, not omitted.
+  Observed China→US express is roughly **flat ~$40–50** (nearly independent of board value:
+  $41.65 on a $2 board, $50.09 on a $326 order) — so model it as a weight/tier flat, not a %.
+- **Customs / duties** — destination- and HTS-dependent and drifts with tariff policy;
+  observed **~33% of merchandise** for China→US in 2026 ($0.70/$2, $107.10/$325.77). Modeled
+  as a config `duty_pct` per origin→destination with an `as_of` date, clearly flagged.
+- **Sales tax** — a function of the *user's* ship-to state, not the vendor. Config `[tax]`
+  rate; default off / user-set.
+- **Promos / coupons** — JLC's "$2 / free-assembly / -$20" churn constantly. We cost the
+  *list* price and show a `discount` line where a standing promo usually applies.
 - **Exact-quote parity** — this is a *rough* estimate to compare options, not a substitute
   for the vendor's own quote engine at checkout.
 
@@ -119,8 +130,8 @@ reads a design file — it consumes a `PriceSpec` the extractor produced.
 ## 5. Per-vendor models (with live numbers)
 
 ### 5a. OSH Park — `confidence: exact`
-Pure area × rate; you get **3 copies** per order (orders are multiples of 3). US shipping
-historically free → shipping note ≈ $0 domestic.
+Pure area × rate; you get **3 copies** per order (orders are multiples of 3). US shipping is
+a real ~$11 FedEx 2 Day line (see below), not free.
 
 | Service | Rate | Copies | Notes |
 |---|---|---|---|
@@ -166,7 +177,25 @@ part** handling/loading fee (Extended parts add a per-line loading fee; Basic/Pr
 don't), per-joint solder cost, stencil. Cost scales with **unique part count**, not raw
 placement count — which we already compute in `bom_assembly.py`.
 
-The base-tier table is the part most worth seeding from the live quote engine and dating.
+**Real anchors (§11), all qty 5:**
+- Flex interposer, bare: **$2.00 / 5** (small board hits the promo floor, even in flex).
+- LVDS Driver V1, bare (4-layer, ENIG, impedance): **$88.95 / 5** ≈ $17.79/board.
+- LVDS Driver V1, **assembled (PCBA): $236.00 / 5** ≈ $47.20/board added on top of the bare
+  board — the JLC-assembly anchor (parts + placement + setup + stencil, bundled).
+- Merchandise ≈ bare + assembly (+ a small ~$0.82 stencil/loading delta).
+
+**Landed cost (JLC, China→US) — the number that actually matters:**
+```
+landed = merchandise + shipping + duties + sales_tax - discounts
+  merchandise = bare_board + assembly
+  shipping    ≈ flat $40–50 express  (weight-tier, ~independent of board value)
+  duties      ≈ duty_pct * merchandise   # observed ~33% China→US, 2026 tariff regime
+  sales_tax   = user_state_rate * taxable_base
+  discounts   = standing coupons (e.g. -$20)
+```
+Observed: $2.00 board → **$48.96 landed**; $325.77 merch → **$500.50 landed**. The base-tier
+table + the `duty_pct`/shipping flats are the parts most worth seeding from live orders and
+dating.
 
 ### 5c. Pikkolo — `confidence: estimate` (assembly only)
 **Upgraded from `manual` to `estimate` — calibrated against a real invoice (§11).** Erie, CO
@@ -204,7 +233,11 @@ prices carry `source_url` + `as_of`.
 catalog = "configs/fab_pricing.toml"   # shared, versioned vendor rate tables
 vendors = ["oshpark", "jlcpcb", "pikkolo"]
 default_qty = 10
-region = "US"                          # shipping-note hint only
+ship_to = "US-CO"                       # drives duty origin→dest + sales-tax rate
+
+[tax]                                   # sales tax is a property of the USER, not the vendor
+state = "CO"
+rate_pct = 8.6                          # user's ship-to combined rate; default off if unset
 ```
 
 ```toml
@@ -228,12 +261,17 @@ confidence = "estimate"
 source_url = "https://jlcpcb.com/quote"
 as_of = "2026-07-16"
 engineering_fee_usd = 1.5
+promo_floor_usd = 2.0             # small boards land at the $2/5 promo floor
 # base[area_band][qty_band] -> usd ; adders keyed by option
 # … tiers + adders …
 [jlcpcb.assembly]
 setup_usd = 8.0
 per_joint_usd = 0.0017
 extended_part_loading_usd = 3.0   # per unique Extended part
+[jlcpcb.landed]                    # China→US, calibrated from real orders (§11)
+shipping_flat_usd = 45.0          # express, weight-tier; ~flat $40–50 observed
+duty_pct = 33.0                   # ~33% of merchandise, 2026 tariff regime — VOLATILE
+# sales tax comes from the global [tax] block; discounts are per-order coupons
 
 [pikkolo]
 service = "assembly"
@@ -251,10 +289,14 @@ component_markup_pct = 20               # parts sourced at cost + 20% stocking f
 ## 7. Provenance & confidence
 
 Every `Quote` reports a `confidence`:
-- **`exact`** — closed-form vendor formula (OSH Park).
-- **`estimate`** — tiered/approximate; excludes shipping/promos (JLC).
+- **`exact`** — closed-form vendor formula (OSH Park board).
+- **`estimate`** — tiered/approximate, incl. estimated landed lines (JLC, Pikkolo).
 - **`manual`** — config values the user must confirm (a vendor with no published or observed
   rates yet).
+
+Landed-cost sub-lines carry their own confidence: `shipping`/`duty`/`tax` are always
+`estimate` (they drift with courier/tariff/state), so even an `exact` board rolls up to an
+`estimate` landed total — and the breakdown says which line is soft.
 
 `kb price --refresh` re-fetches the public pricing pages and rewrites the catalog's rate
 tables + `as_of` (OSH Park + JLC publish theirs; Pikkolo stays manual). A stale `as_of`
@@ -267,23 +309,22 @@ real UA/headers or a small per-vendor scraper — flagged as an implementation r
 ## 8. CLI / UX
 
 ```
-$ kb price --qty 3
-Board: interposer · 2-layer · 6 placements
+$ kb price --qty 5 --landed
+Board: LVDS Driver V1 · 4-layer · ENIG · impedance · 128 joints / 24 uniq
 
-FAB (bare board, qty 3 = 1 set)
-  OSH Park    $11.60   exact      1 set of 3 + FedEx 2 Day ~$11.00
-  JLCPCB      $ 4.00   estimate   + ship ~$18 (excl.)      [tier: standard]
+BARE BOARD (qty 5)               board    +ship   +duty   +tax    = LANDED
+  OSH Park    (4L n/a impedance — flagged over capability)
+  JLCPCB      $88.95   estimate  +$45.00  +$29.35 +$14    ≈ $177   [tier: 4L/ENIG]
 
-ASSEMBLY (qty 3)
-  Pikkolo     $31.31   estimate   components $28.72 (+20%) + 6×$0.348 + $0.50 setup
-  JLCPCB      $—       estimate   (needs BOM costing)
+POPULATED (qty 5, board + assembly)
+  JLCPCB all-in   merch $325   +$50 ship +$107 duty +$38 tax -$20  ≈ $500  ← matches §11 order
+  OSH Park + Pikkolo   (interposer flow; needs Pikkolo BOM costing)
 
-BEST POPULATED COMBO
-  OSH Park board + Pikkolo asm   ≈ $53.91   ← the user's actual interposer flow (§11)
-  JLCPCB all-in                  ≈ $—       (+ ship, ex-promo)
+  ⚠ landed dominated by duty+shipping ($157 of $500) — China→US 2026 tariff regime
 
+$ kb price --qty 3 --fab oshpark     # small interposer, cheapest proto
+  OSH Park    $11.60 board + $11.00 FedEx 2 Day = $22.60 exact
 $ kb price --stackup 2L_1oz          # re-cost a 2-layer respin
-$ kb price --fab oshpark --qty 3     # single vendor, cheapest proto qty
 $ kb price --json                    # machine-readable, for the sidecar tab
 ```
 
@@ -308,11 +349,12 @@ visible while choosing a stackup; and a **sidecar** dashboard tab (`--json` feed
 
 - **P0 — spec extractor:** `board_bbox()` in `pcbgeom` + `PriceSpec` from `fab.config`/BOM.
   Unit-tested against the LVDS board. No pricing yet.
-- **P1 — OSH Park (`exact`):** closed-form model + `kb price --fab oshpark`. Proves the
-  pipeline end-to-end on a real board.
-- **P2 — vendor catalog + JLC fab (`estimate`):** config schema, tier tables, adders,
-  comparison table.
-- **P3 — assembly:** JLC assembly + Pikkolo; populated-board combo rows.
+- **P1 — OSH Park (`exact`) + landed shell:** closed-form board model + the landed-cost
+  scaffold (`shipping`/`duty`/`tax`/`discount` lines, `--landed`). Even OSH Park needs the
+  ~$11 shipping line, so landed lands here, not later. Validates against the interposer order.
+- **P2 — vendor catalog + JLC fab (`estimate`):** config schema, tier tables, adders, plus the
+  JLC landed block (flat shipping + `duty_pct` + `[tax]`). Validates against both JLC orders.
+- **P3 — assembly:** JLC assembly + Pikkolo (BOM-costed components ×1.20); populated combo rows.
 - **P4 — provenance/refresh + sidecar tab + `stackup-sync` cost column.**
 
 ---
@@ -358,8 +400,43 @@ $31.31), before any final ship from Pikkolo to the user.
   cost + 20%**. Upgraded Pikkolo from `manual` → `estimate`.
 - The **mix-vendor combo is the primary use case**, confirmed by the ship-to address.
 
-*(TODO: add a JLC-all-in order and a higher-placement Pikkolo order to disambiguate
-placements-vs-unique-parts and firm up the JLC tier table.)*
+### `interposer-flex-gerbers_Y5` (JLCPCB, order Y5-11703125A) — bare flex, shipping dominates
+| Line | Amount |
+|---|---|
+| PCB (flex), 5 pcs | $2.00 |
+| Merchandise total | $2.00 |
+| Shipping charge | **$41.65** |
+| Customs duties & taxes | $0.70 |
+| Sales tax | $4.61 |
+| **Order total** | **$48.96** |
+
+Board is **24× cheaper than shipping.** Even a flex board hits JLC's $2/5 promo floor. Landed
+cost is ~entirely logistics — the case that proves board-price-only is useless for JLC.
+
+### `LVDS_Driver_V1-gerbers_Y3` (JLCPCB, order Y3-11703125A) — bare + assembled, qty 5
+| Line | Amount |
+|---|---|
+| PCB (4-layer, ENIG, impedance), 5 pcs | $88.95 |
+| **PCBA assembly**, 5 pcs (SMT026062363594) | $236.00 |
+| Merchandise total | $325.77 |
+| Shipping charge | $50.09 |
+| **Customs duties & taxes** | **$107.10** |
+| Discount (coupon) | −$20.00 |
+| Sales tax | $37.54 |
+| **Order total** | **$500.50** |
+
+**What these two JLC orders pinned:**
+- JLC bare 4-layer/ENIG/impedance ≈ **$17.79/board** (×5 = $88.95); small boards floor at **$2/5**.
+- JLC **assembly ≈ $47.20/board** on top of the bare board ($236/5) — the PCBA anchor.
+- **Shipping is ~flat** ($41.65 vs $50.09 across a $2 → $326 range) → model as a weight-tier
+  flat (~$45), not a percentage.
+- **Customs duties ≈ 33% of merchandise** ($0.70/$2 = 35%, $107.10/$325.77 = 33%) — the 2026
+  China→US tariff regime; the single largest surprise cost and the most volatile config value.
+- **Landed cost is mandatory:** $2 → $48.96, $325.77 → $500.50. Duty + shipping alone were
+  **$157 (31%)** of the LVDS order.
+
+*(Still TODO: a higher-placement Pikkolo order to disambiguate placements-vs-unique-parts;
+JLC per-option adder deltas — the anchors above are bundle totals, not itemized adders.)*
 
 ---
 
