@@ -40,12 +40,17 @@ interchangeable.**
 |---|:--:|:--:|---|
 | **OSH Park** | ✅ | ❌ | US proto/medium-run bare boards. **Pure `area × rate`** — the easiest, most predictable model that exists. Ground-truth anchor. |
 | **JLCPCB** | ✅ | ✅ | Tiered, promo-driven, does everything. The complex model. |
-| **Pikkolo** | ❌ | ✅ | Denver assembly house, **assembly only** (~$0.10/placement, low-volume, US turn). Pairs with someone else's bare board. |
+| **Pikkolo** | ❌ | ✅ | Erie, CO assembly house, **assembly only** (~$0.35/placement, $0.50 setup, turnkey w/ components at cost +20%). Pairs with someone else's bare board. |
 
 **Consequence:** the model separates **fab** cost from **assembly** cost, and a *populated-
 board* quote can combine two vendors (e.g. **OSH Park board + Pikkolo assembly**, or JLC for
 both). The comparison output should therefore be able to show mix-and-match rows, not just
 one vendor per line.
+
+**This is confirmed by a real order** (see [§11 Calibration](#11-calibration--real-orders)):
+the user's `interposer-v1-pikkolo` was **fabbed by OSH Park and shipped direct to Pikkolo's
+address** for assembly. The mix-vendor combo isn't a nice-to-have — it's the primary
+workflow, so the "populated-board combo" row is a first-class output, not an extra.
 
 ---
 
@@ -133,6 +138,14 @@ copies = 3 * ceil(qty / 3)          # you always get multiples of 3
 Formula is exact; the only judgement is picking the service tier (proto vs medium-run vs
 swift) from the requested qty + lead time.
 
+**Shipping is NOT free** — corrected from the initial draft. A real order (§11) shipped
+**FedEx 2 Day at $11.00** on an $11.60 board: on small proto boards shipping ≈ the board
+cost, so it must be modeled, not assumed $0. Treat as a config `shipping[method] = flat`
+estimate (FedEx 2 Day ≈ $11) with a note that it's a standing estimate, not a live rate.
+That same order also showed **Super Swift at $0.00** — consistent with OSH Park now bundling
+Super Swift into the 2-layer proto tier at no upcharge; the $20/in² swift rate applies to the
+4-layer swift service.
+
 ### 5b. JLCPCB — `confidence: estimate`
 Tiered base (area × qty) + per-option adders + engineering fee. Instant quotes advertised
 "from $2". Model = a **base tier table** (area-band × qty-band → base price) plus additive
@@ -155,12 +168,28 @@ placement count — which we already compute in `bom_assembly.py`.
 
 The base-tier table is the part most worth seeding from the live quote engine and dating.
 
-### 5c. Pikkolo — `confidence: manual` (assembly only)
-Denver assembly, low-volume, ~**$0.10 / placement**, fast US turn / local pickup. Public
-pricing is thin (setup/NRE not published), so v1 ships a **config stub** with the known
-per-placement rate and a `TODO` setup fee for the user to fill from a real quote (or an
-industry-standard $100–300 NRE placeholder, clearly flagged). Pairs with an OSH Park or JLC
-bare board for a full populated-board estimate.
+### 5c. Pikkolo — `confidence: estimate` (assembly only)
+**Upgraded from `manual` to `estimate` — calibrated against a real invoice (§11).** Erie, CO
+turnkey assembly with a boutique, low-volume-friendly structure (the earlier "$0.10/placement,
+$100–300 NRE" guess was wrong on both counts):
+
+```
+components = sum(part_unit_cost * qty) * (1 + 0.20) [+ applicable tariffs]   # Pikkolo sources parts
+placement  = placements * per_placement_usd            # observed ≈ $0.348/placement
+setup      = setup_usd                                 # observed $0.50 flat  (!)
+assembly_total = components + placement + setup
+```
+
+Observed on a 6-placement order: components **$28.72** (incl. the 20% stocking fee), placement
+**$2.09** (6 × ≈ $0.348), setup **$0.50** → **$31.31** total. Two calibration caveats (single
+data point):
+- Whether "Part Placement × 6" counts **total placements** or **unique parts** is unconfirmed —
+  for this board they may coincide. Flag both interpretations until a second, higher-count
+  order disambiguates.
+- The **components line needs BOM part pricing** (unit cost × qty), which we can pull from the
+  BOM / `lcsc-bom-picker` data — so Pikkolo assembly cost is only as good as the BOM's costed
+  lines. Parts without a price → the components estimate is marked partial.
+- Tariffs are order-/part-dependent and left out of the estimate (noted, not modeled).
 
 ---
 
@@ -190,6 +219,8 @@ copies_multiple = 3
 [[oshpark.rate]]  layers = 4  tier = "proto"       usd_per_in2 = 10.0
 [[oshpark.rate]]  layers = 2  tier = "medium_run"  usd_per_in2 = 1.0   min_in2 = 100
 [[oshpark.rate]]  layers = 4  tier = "medium_run"  usd_per_in2 = 2.0   min_in2 = 100
+[oshpark.shipping]                      # NOT free — calibrated from a real order
+fedex_2day_usd = 11.0                   # standing estimate, not a live rate
 
 [jlcpcb]
 service = "fab+assembly"
@@ -206,11 +237,13 @@ extended_part_loading_usd = 3.0   # per unique Extended part
 
 [pikkolo]
 service = "assembly"
-confidence = "manual"
+confidence = "estimate"                 # calibrated from a real invoice, §11
 source_url = "https://www.pikkoloassembly.com/"
 as_of = "2026-07-16"
-per_placement_usd = 0.10
-setup_usd = 0        # TODO: confirm from a real quote
+per_placement_usd = 0.348               # observed 6 placements → $2.09
+setup_usd = 0.50                        # observed flat setup
+component_markup_pct = 20               # parts sourced at cost + 20% stocking fee
+# tariffs: order/part-dependent, not modeled (noted in output)
 ```
 
 ---
@@ -220,7 +253,8 @@ setup_usd = 0        # TODO: confirm from a real quote
 Every `Quote` reports a `confidence`:
 - **`exact`** — closed-form vendor formula (OSH Park).
 - **`estimate`** — tiered/approximate; excludes shipping/promos (JLC).
-- **`manual`** — config values the user must confirm (Pikkolo NRE).
+- **`manual`** — config values the user must confirm (a vendor with no published or observed
+  rates yet).
 
 `kb price --refresh` re-fetches the public pricing pages and rewrites the catalog's rate
 tables + `as_of` (OSH Park + JLC publish theirs; Pikkolo stays manual). A stale `as_of`
@@ -233,20 +267,20 @@ real UA/headers or a small per-vendor scraper — flagged as an implementation r
 ## 8. CLI / UX
 
 ```
-$ kb price --qty 10
-Board: 42.0 × 58.0 mm (3.77 in²) · 4-layer · 1.6 mm · 1 oz · ENIG · 128 joints / 24 uniq
+$ kb price --qty 3
+Board: interposer · 2-layer · 6 placements
 
-FAB (bare board, qty 10)
-  OSH Park    $150.80   exact      → 12 boards (multiples of 3), US ship ~$0
-  JLCPCB      $23.40    estimate   + ship ~$18 (excl.)      [tier: standard]
+FAB (bare board, qty 3 = 1 set)
+  OSH Park    $11.60   exact      1 set of 3 + FedEx 2 Day ~$11.00
+  JLCPCB      $ 4.00   estimate   + ship ~$18 (excl.)      [tier: standard]
 
-ASSEMBLY (qty 10)
-  JLCPCB      $41.20    estimate   setup $8 + 24 uniq + 1280 joints
-  Pikkolo     $128.00   manual     1280 placements × $0.10  (+ setup TODO)
+ASSEMBLY (qty 3)
+  Pikkolo     $31.31   estimate   components $28.72 (+20%) + 6×$0.348 + $0.50 setup
+  JLCPCB      $—       estimate   (needs BOM costing)
 
 BEST POPULATED COMBO
-  OSH Park board + Pikkolo asm   $278.80   (US, no import)
-  JLCPCB all-in                  $82.60    (+ ship, ex-promo)
+  OSH Park board + Pikkolo asm   ≈ $53.91   ← the user's actual interposer flow (§11)
+  JLCPCB all-in                  ≈ $—       (+ ship, ex-promo)
 
 $ kb price --stackup 2L_1oz          # re-cost a 2-layer respin
 $ kb price --fab oshpark --qty 3     # single vendor, cheapest proto qty
@@ -280,6 +314,52 @@ visible while choosing a stackup; and a **sidecar** dashboard tab (`--json` feed
   comparison table.
 - **P3 — assembly:** JLC assembly + Pikkolo; populated-board combo rows.
 - **P4 — provenance/refresh + sidecar tab + `stackup-sync` cost column.**
+
+---
+
+## 11. Calibration — real orders
+
+Ground-truth anchors the estimator against. Each entry is a real invoice; the model is
+"good" when it reproduces these within a stated tolerance.
+
+### `interposer-v1-pikkolo` (2026-07-14) — populated interposer, OSH Park fab + Pikkolo asm
+The user's actual two-vendor flow: **OSH Park fabs the bare board and ships it direct to
+Pikkolo** (ship-to = `Pikkolo Assembly, 3336 Arapahoe Rd Unit B PMB 248, Erie CO 80516`),
+Pikkolo populates it.
+
+**OSH Park invoice** (order `sgFAiLi9`) — bare board:
+| Line | Amount |
+|---|---|
+| PCB set cost ($11.60 / set of 3), qty 3 | $11.60 |
+| Super Swift Service | $0.00 |
+| Project subtotal | $11.60 |
+| Shipping — FedEx 2 Day | $11.00 |
+| **Total** | **$22.60** |
+
+**Pikkolo invoice** — assembly (6 placements):
+| Line | Amount |
+|---|---|
+| Components (+20% stocking fee / applicable tariffs) | $28.72 |
+| Part Placement × 6 (≈ $0.348 ea) | $2.09 |
+| Setup | $0.50 |
+| Subtotal | $31.31 |
+| Shipping | $0.00 |
+| **Total** | **$31.31** |
+
+**Populated board, end-to-end ≈ $53.91** (OSH Park $22.60 incl. ship-to-Pikkolo + Pikkolo
+$31.31), before any final ship from Pikkolo to the user.
+
+**What this calibration pinned / corrected:**
+- OSH Park bare board is exactly `set_cost` per set of 3 → **$11.60/set** for this interposer
+  (⇒ ≈ 2.3 in² at $5/in² 2-layer, or ≈ 1.16 in² at 4-layer — layer count TBC from the board).
+- OSH Park **shipping is real** (~$11 FedEx 2 Day), not $0 — the single biggest fix.
+- OSH Park **Super Swift bundled at $0.00** on 2-layer proto.
+- Pikkolo: **$0.50 setup** (not $100–300), **≈$0.348/placement** (not $0.10), **components at
+  cost + 20%**. Upgraded Pikkolo from `manual` → `estimate`.
+- The **mix-vendor combo is the primary use case**, confirmed by the ship-to address.
+
+*(TODO: add a JLC-all-in order and a higher-placement Pikkolo order to disambiguate
+placements-vs-unique-parts and firm up the JLC tier table.)*
 
 ---
 
