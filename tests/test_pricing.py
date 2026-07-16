@@ -93,3 +93,45 @@ def test_jlc_small_board_hits_promo_floor():
     board = q.items[0]
     assert board.amount_usd == 2.0
     assert q.confidence == "estimate"
+
+
+# -- assembly: Pikkolo reproduces the real interposer invoice exactly --------
+def test_pikkolo_interposer_invoice_exact():
+    # Real Pikkolo invoice: 6-placement interposer, 1 board, bare parts $23.93.
+    #   setup $0.50 + 6×$0.348 + $23.93×1.20 = $31.31
+    spec = _spec(2.32, 2, n_placements=6)
+    q = models.PikkoloModel().price(spec, _cat(), qty=1, bom_cost=23.93)
+    assert round(q.total, 2) == 31.31
+    assert not q.partial
+    labels = {i.label.split()[0] for i in q.items}
+    assert {"Setup", "Part", "Components"} <= labels
+
+
+def test_pikkolo_partial_without_bom_cost():
+    spec = _spec(2.32, 2, n_placements=6)
+    q = models.PikkoloModel().price(spec, _cat(), qty=1)   # no bom_cost
+    assert q.partial
+    # labor still present (setup + placement)
+    assert round(q.total, 2) == round(0.50 + 6 * 0.348, 2)
+
+
+def test_pikkolo_placements_scale_with_qty():
+    spec = _spec(2.32, 2, n_placements=6)
+    q = models.PikkoloModel().price(spec, _cat(), qty=3, bom_cost=10.0)
+    place = next(i for i in q.items if i.label.startswith("Part"))
+    assert round(place.amount_usd, 2) == round(6 * 3 * 0.348, 2)
+    comp = next(i for i in q.items if i.label.startswith("Components"))
+    assert round(comp.amount_usd, 2) == round(10.0 * 3 * 1.20, 2)
+
+
+# -- populated-board combo ---------------------------------------------------
+def test_combo_oshpark_plus_pikkolo():
+    spec = _spec(2.32, 2, n_placements=6)
+    fabs = models.fab_quotes(spec, _cat(), qty=3)          # includes OSH Park
+    asms = models.assembly_quotes(spec, _cat(), qty=3, bom_cost=10.0)
+    combos = models.combo_rows(fabs, asms)
+    combo = next(c for c in combos if "Pikkolo" in c.label)
+    osh = next(q for q in fabs if q.vendor == "OSH Park").total
+    pik = next(q for q in asms if q.vendor == "Pikkolo").total
+    assert round(combo.total, 2) == round(osh + pik, 2)
+    assert not combo.partial

@@ -29,6 +29,7 @@ class PriceSpec:
     finish: str | None
     n_placements: int | None = None
     n_unique_parts: int | None = None
+    n_joints: int | None = None          # total placed pads ≈ solder joints (per board)
     warnings: list[str] = field(default_factory=list)
 
     def dims_str(self) -> str:
@@ -46,10 +47,11 @@ def _fab_json(cfg: cfgmod.Config) -> dict:
     return {}
 
 
-def _placement_counts(cfg: cfgmod.Config, warnings: list[str]) -> tuple[int | None, int | None]:
-    """(n_placements, n_unique_parts), best-effort. Never raises."""
-    n_place = n_uniq = None
-    # placements from the PCB (public pcbgeom parse)
+def _placement_counts(cfg: cfgmod.Config,
+                      warnings: list[str]) -> tuple[int | None, int | None, int | None]:
+    """(n_placements, n_unique_parts, n_joints), best-effort. Never raises."""
+    n_place = n_uniq = n_joints = None
+    # placements + joints from the PCB (public pcbgeom parse)
     if cfg.pcb and cfg.pcb.exists():
         try:
             from ..core import pcbgeom
@@ -57,6 +59,7 @@ def _placement_counts(cfg: cfgmod.Config, warnings: list[str]) -> tuple[int | No
             refs = [r for r in board.placements
                     if not r.startswith(("#", "FID", "H", "REF", "TP"))]
             n_place = len(refs) or None
+            n_joints = len(board.pads) or None
         except Exception:  # pragma: no cover - defensive; a rough tool must not crash here
             warnings.append("could not read placements from PCB")
     # unique parts from the BOM (needs openpyxl); fall back to distinct footprints
@@ -69,7 +72,7 @@ def _placement_counts(cfg: cfgmod.Config, warnings: list[str]) -> tuple[int | No
             n_uniq = len(keys) or None
         except Exception:
             warnings.append("could not read unique-part count from BOM")
-    return n_place, n_uniq
+    return n_place, n_uniq, n_joints
 
 
 def extract_spec(cfg: cfgmod.Config) -> PriceSpec:
@@ -90,7 +93,7 @@ def extract_spec(cfg: cfgmod.Config) -> PriceSpec:
     if not fab:
         warnings.append("no fab design-rules JSON — layers/thickness/copper unknown")
 
-    n_place, n_uniq = _placement_counts(cfg, warnings)
+    n_place, n_uniq, n_joints = _placement_counts(cfg, warnings)
 
     return PriceSpec(
         board_name=name,
@@ -103,5 +106,6 @@ def extract_spec(cfg: cfgmod.Config) -> PriceSpec:
         finish=fab.get("finish") or fab.get("surface_finish"),
         n_placements=n_place,
         n_unique_parts=n_uniq,
+        n_joints=n_joints,
         warnings=warnings,
     )

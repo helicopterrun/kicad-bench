@@ -357,7 +357,11 @@ visible while choosing a stackup; and a **sidecar** dashboard tab (`--json` feed
   anchor (coarse rate → $88.93 vs real $88.95). `tests/test_pricing.py`, 8 tests.
 - **P2 — vendor catalog + JLC fab (`estimate`):** config schema, tier tables, adders, plus the
   JLC landed block (flat shipping + `duty_pct` + `[tax]`). Validates against both JLC orders.
-- **P3 — assembly:** JLC assembly + Pikkolo (BOM-costed components ×1.20); populated combo rows.
+- **P3 — assembly ✅ (done):** `PikkoloModel` + `JlcAssemblyModel` (labor precise; components
+  taken as a supplied per-board `--bom-cost` since the BOM carries LCSC# but no prices) +
+  `combo_rows()` (OSH Park board + Pikkolo asm; JLCPCB all-in). Pikkolo **reproduces the real
+  $31.31 interposer invoice exactly** ($0.50 + 6×$0.348 + $23.93×1.20); JLC asm ≈ $236 anchor.
+  A quote is flagged `~partial` (labor-only) when `--bom-cost` is absent. +6 tests (18 total).
 - **P4 — provenance/refresh + sidecar tab + `stackup-sync` cost column.**
 
 ---

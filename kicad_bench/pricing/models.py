@@ -44,6 +44,7 @@ class Quote:
     items: list[LineItem] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     ok: bool = True                   # False when the vendor can't build this spec
+    partial: bool = False             # True when a cost input is missing (e.g. components)
 
     @property
     def total(self) -> float:
@@ -166,8 +167,72 @@ class JlcpcbModel:
         return q
 
 
-# -- registry ----------------------------------------------------------------
+# -- assembly models ---------------------------------------------------------
+# Assembly cost is COMPONENT-dominated (the JLC PCBA anchor $236/5 dwarfs any placement
+# labor). Component prices are not in the BOM (LCSC# only), so we take the bare per-board
+# parts cost as a supplied input (`bom_cost`, e.g. the Pikkolo invoice Components / 1.20, or
+# a JLC-cart total / boards). Labor is computed precisely; components are flagged when absent.
+
+class PikkoloModel:
+    name = "pikkolo"
+    services = frozenset({"assembly"})
+
+    def price(self, spec: PriceSpec, cat: Catalog, qty: int,
+              bom_cost: float | None = None) -> Quote:
+        vc = cat.vendor("pikkolo")
+        conf = vc.get("confidence", "estimate")
+        q = Quote(vendor="Pikkolo", service="assembly")
+        if not spec.n_placements:
+            q.ok = False
+            q.notes.append("placement count unknown — cannot price assembly")
+            return q
+        q.items.append(LineItem("Setup", round(vc.get("setup_usd", 0.50), 2), conf))
+        placements = spec.n_placements * qty
+        per = vc.get("per_placement_usd", 0.348)
+        q.items.append(LineItem(f"Part placement × {placements} (@ ${per:g})",
+                                round(placements * per, 2), conf))
+        markup = 1.0 + vc.get("component_markup_pct", 20.0) / 100.0
+        if bom_cost is not None:
+            q.items.append(LineItem(
+                f"Components {qty}× (+{vc.get('component_markup_pct', 20):g}% stocking)",
+                round(bom_cost * qty * markup, 2), conf))
+            q.notes.append("tariffs not modeled")
+        else:
+            q.partial = True
+            q.notes.append("components UNKNOWN — pass --bom-cost <per-board $> for full total")
+        return q
+
+
+class JlcAssemblyModel:
+    name = "jlcpcb-asm"
+    services = frozenset({"assembly"})
+
+    def price(self, spec: PriceSpec, cat: Catalog, qty: int,
+              bom_cost: float | None = None) -> Quote:
+        asm = cat.vendor("jlcpcb").get("assembly", {})
+        conf = cat.vendor("jlcpcb").get("confidence", "estimate")
+        q = Quote(vendor="JLCPCB (asm)", service="assembly")
+        q.items.append(LineItem("Setup", round(asm.get("setup_usd", 8.0), 2), conf))
+        if spec.n_joints:
+            joints = spec.n_joints * qty
+            per_j = asm.get("per_joint_usd", 0.0017)
+            q.items.append(LineItem(f"Solder joints × {joints} (@ ${per_j:g})",
+                                    round(joints * per_j, 2), conf))
+        else:
+            q.notes.append("joint count unknown — labor understated")
+        if bom_cost is not None:
+            q.items.append(LineItem(f"Components {qty}× (JLC-sourced)",
+                                    round(bom_cost * qty, 2), conf))
+        else:
+            q.partial = True
+            q.notes.append("components UNKNOWN — pass --bom-cost <per-board $> for full total")
+        q.notes.append("labor structural; component basis differs from Pikkolo (no markup)")
+        return q
+
+
+# -- registries + combos -----------------------------------------------------
 FAB_MODELS = {"oshpark": OshParkModel(), "jlcpcb": JlcpcbModel()}
+ASM_MODELS = {"pikkolo": PikkoloModel(), "jlcpcb": JlcAssemblyModel()}
 
 
 def fab_quotes(spec: PriceSpec, cat: Catalog, qty: int, tier: str = "proto") -> list[Quote]:
@@ -176,4 +241,47 @@ def fab_quotes(spec: PriceSpec, cat: Catalog, qty: int, tier: str = "proto") -> 
         m = FAB_MODELS.get(name)
         if m:
             out.append(m.price(spec, cat, qty, tier))
+    return out
+
+
+def assembly_quotes(spec: PriceSpec, cat: Catalog, qty: int,
+                    bom_cost: float | None = None) -> list[Quote]:
+    out = []
+    for name in cat.vendors:
+        m = ASM_MODELS.get(name)
+        if m:
+            out.append(m.price(spec, cat, qty, bom_cost))
+    return out
+
+
+@dataclass
+class Combo:
+    label: str
+    total: float
+    confidence: str
+    partial: bool
+    note: str = ""
+
+
+def combo_rows(fabs: list[Quote], asms: list[Quote]) -> list[Combo]:
+    """Populated-board totals = a fab quote + an assembly quote. Highlights the real flows:
+    OSH Park board + Pikkolo assembly, and JLCPCB all-in."""
+    fab = {q.vendor: q for q in fabs if q.ok}
+    asm = {q.vendor: q for q in asms if q.ok}
+    out: list[Combo] = []
+    pairs = [
+        ("OSH Park board + Pikkolo asm", "OSH Park", "Pikkolo",
+         "the interposer flow (§11)"),
+        ("JLCPCB all-in", "JLCPCB", "JLCPCB (asm)", "fab + assembly, one vendor"),
+    ]
+    for label, fv, av, note in pairs:
+        if fv in fab and av in asm:
+            f, a = fab[fv], asm[av]
+            out.append(Combo(
+                label=label,
+                total=round(f.total + a.total, 2),
+                confidence=_rollup(f.confidence, a.confidence),
+                partial=f.partial or a.partial,
+                note=note,
+            ))
     return out
