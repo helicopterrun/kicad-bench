@@ -347,11 +347,14 @@ visible while choosing a stackup; and a **sidecar** dashboard tab (`--json` feed
 
 ## 10. Phased build (once signed off)
 
-- **P0 — spec extractor:** `board_bbox()` in `pcbgeom` + `PriceSpec` from `fab.config`/BOM.
-  Unit-tested against the LVDS board. No pricing yet.
-- **P1 — OSH Park (`exact`) + landed shell:** closed-form board model + the landed-cost
-  scaffold (`shipping`/`duty`/`tax`/`discount` lines, `--landed`). Even OSH Park needs the
-  ~$11 shipping line, so landed lands here, not later. Validates against the interposer order.
+- **P0 — spec extractor ✅ (done):** `pricing/geom.py` (Edge.Cuts bbox, stdlib-only) +
+  `pricing/spec.py` (`PriceSpec` from `fab.config`/BOM). Validated on the real LVDS board
+  (extracts 150×75 mm = 17.44 in², 143 placements, 56 unique parts).
+- **P1 — OSH Park (`exact`) + landed shell ✅ (done):** `pricing/models.py` (OSH Park exact,
+  `landed()` scaffold, coarse JLC) + `pricing/catalog.py` (calibrated defaults + `cfg.raw`
+  overrides) + `kb price` (`pricing/cli.py`, table + `--json`). Tests reproduce the OSH Park
+  documented example ($20/2 in² 4L), the $11.60 interposer set cost, and the JLC bare
+  anchor (coarse rate → $88.93 vs real $88.95). `tests/test_pricing.py`, 8 tests.
 - **P2 — vendor catalog + JLC fab (`estimate`):** config schema, tier tables, adders, plus the
   JLC landed block (flat shipping + `duty_pct` + `[tax]`). Validates against both JLC orders.
 - **P3 — assembly:** JLC assembly + Pikkolo (BOM-costed components ×1.20); populated combo rows.
