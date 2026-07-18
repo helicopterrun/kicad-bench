@@ -134,9 +134,9 @@ def run(args) -> int:
 
 
 def tables_from_cfg(cfg: cfgmod.Config, g: graphmod.DesignGraph) -> PinTables:
-    """Alt-function tables from the extracted-constraints store; empty until the
-    constraints phase wires it up."""
-    return {}
+    """Alt-function tables from the extracted-constraints store (kb constraints)."""
+    from ..core import conspec
+    return conspec.pin_tables(cfg, g.components)
 
 
 def add_parser(sub):

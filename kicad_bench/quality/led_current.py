@@ -148,7 +148,8 @@ def run(args) -> int:
     sch = Path(args.schematic) if args.schematic else cfg.root_sch
     if not sch or not Path(sch).exists():
         sys.exit(f"error: schematic not found: {sch}")
-    return render_and_exit(check(graphmod.build(sch)))
+    from ..core import conspec
+    return render_and_exit(check(graphmod.build(sch), lookup=conspec.lookup(cfg)))
 
 
 def add_parser(sub):

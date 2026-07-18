@@ -131,9 +131,9 @@ def run(args) -> int:
     return render_and_exit(check(g, factors_from_cfg(cfg), _lookup(cfg)))
 
 
-def _lookup(cfg: cfgmod.Config) -> ConstraintsLookup | None:
-    """Extracted-constraints lookup once the store exists (kb constraints); else None."""
-    return None  # wired up by the constraints phase
+def _lookup(cfg: cfgmod.Config) -> ConstraintsLookup:
+    from ..core import conspec
+    return conspec.lookup(cfg)
 
 
 def add_parser(sub):

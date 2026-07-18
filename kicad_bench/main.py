@@ -10,7 +10,7 @@ import argparse
 import os
 import sys
 
-from . import __version__, audit, datasheet, libsearch, release_freeze, sch_live, scaffold, sidecar, stage
+from . import __version__, audit, constraints, datasheet, libsearch, release_freeze, sch_live, scaffold, sidecar, stage
 from . import init as init_cmd
 from .core import cli
 from .quality import (approved_parts, block_review, cap_derating, commit_gate,
@@ -29,7 +29,7 @@ _TOOLS = [
     erc_triage, netlist_audit, block_review, approved_parts, commit_gate,  # Priority 1
     ksir_sync,                                                   # .ksir <-> sheet drift gate
     symbol_style, sch_readability,                               # library + sheet layout rule gates
-    cap_derating, led_current, pin_mux,                          # datasheet-grounded deterministic checks
+    cap_derating, led_current, pin_mux, constraints,             # datasheet-grounded checks + constraints store
     netclass_coverage, netclass_sync, dfm_preflight, stackup_sync,  # Priority 2
     release_prep, dru_lint,
     diffpair_audit, track_conformance, route_coverage, dru_guard,   # Priority 3: routed-geometry audits

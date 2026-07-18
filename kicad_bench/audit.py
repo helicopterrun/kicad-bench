@@ -80,9 +80,11 @@ def run_all(cfg: cfgmod.Config) -> list[tuple[str, Result]]:
                 seen.add(c["reference"])
                 comps.append(c)
     g = graphmod.build_from(counts, pin_net, comps)
+    from .core import conspec
+    lookup = conspec.lookup(cfg)
     out.append(("Datasheet checks",
-                cap_derating.check(g, cap_derating.factors_from_cfg(cfg))))
-    out.append(("Datasheet checks", led_current.check(g)))
+                cap_derating.check(g, cap_derating.factors_from_cfg(cfg), lookup)))
+    out.append(("Datasheet checks", led_current.check(g, lookup=lookup)))
     out.append(("Datasheet checks", pin_mux.check(g, pin_mux.tables_from_cfg(cfg, g))))
 
     # ---- Rules & config ----
