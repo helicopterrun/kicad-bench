@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 from typing import Callable
 
-from ..core import config as cfgmod, graph as graphmod, partspec
+from ..core import config as cfgmod, conspec, graph as graphmod, partspec
 from ..core.report import Result, render_and_exit
 
 _RES_REF = re.compile(r"^R\d+$")
@@ -40,8 +40,9 @@ def _is_led(comp: graphmod.Component) -> bool:
 def _led_spec(comp: graphmod.Component,
               lookup: ConstraintsLookup | None) -> tuple[float | None, float | None]:
     """(Vf volts, If_max amps) — None for anything not clearly stated."""
-    if lookup and comp.mpn:
-        spec = ((lookup(comp.mpn) or {}).get("spec") or {})
+    key = conspec.part_key(comp) if lookup else ""
+    if lookup and key:
+        spec = ((lookup(key) or {}).get("spec") or {})
         vf, imax = spec.get("vf"), spec.get("if_max")
         if vf is not None and imax is not None:
             return float(vf), float(imax)

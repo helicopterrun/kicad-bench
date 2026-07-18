@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 from typing import Callable
 
-from ..core import config as cfgmod, graph as graphmod, partspec
+from ..core import config as cfgmod, conspec, graph as graphmod, partspec
 from ..core.report import Result, render_and_exit
 
 DEFAULT_FACTORS = {"ceramic": 0.8, "tantalum": 0.5, "electrolytic": 0.8}
@@ -38,8 +38,9 @@ ConstraintsLookup = Callable[[str], dict | None]
 def _cap_rating(comp: graphmod.Component,
                 lookup: ConstraintsLookup | None) -> tuple[float | None, str]:
     """(rated volts | None, dielectric class) for a capacitor."""
-    if lookup and comp.mpn:
-        cons = lookup(comp.mpn)
+    key = conspec.part_key(comp) if lookup else ""
+    if lookup and key:
+        cons = lookup(key)
         spec = (cons or {}).get("spec") or {}
         v = spec.get("v_rating")
         if v is not None:

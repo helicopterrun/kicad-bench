@@ -47,6 +47,26 @@ def norm_mpn(mpn: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", mpn.upper())
 
 
+# A Value field that plausibly IS a part number: one token, >=6 chars, letters and
+# digits mixed ("TPS65150PWPR" yes; "100nF", "MCU", "Barrel_Jack" no).
+_PARTISH_VALUE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/+-]{5,}$")
+
+
+def part_key(comp) -> str:
+    """The string to match a component against the constraints store: its MPN,
+    or — when the symbol has no MPN field — a Value that looks like a part
+    number (a common schematic convention for ICs)."""
+    mpn = getattr(comp, "mpn", "") or ""
+    if mpn:
+        return mpn
+    value = (getattr(comp, "value", "") or "").strip()
+    if (_PARTISH_VALUE.fullmatch(value)
+            and any(c.isdigit() for c in value)
+            and any(c.isalpha() for c in value)):
+        return value
+    return ""
+
+
 def mpn_matches(bom_mpn: str, cons_mpn: str) -> bool:
     """True when a BOM MPN and a constraints MPN refer to the same part family.
 
@@ -150,7 +170,7 @@ def pin_tables(cfg: cfgmod.Config, components: dict) -> dict[str, dict[str, list
     find = lookup(cfg)
     out: dict[str, dict[str, list[str]]] = {}
     for ref, comp in components.items():
-        mpn = getattr(comp, "mpn", "") or ""
+        mpn = part_key(comp)
         if not mpn:
             continue
         cons = find(mpn)

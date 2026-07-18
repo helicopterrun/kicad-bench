@@ -117,7 +117,7 @@ def build_session(cfg: cfgmod.Config, ref: str) -> reviewmod.ReviewSession:
     lib = reviewmod.DatasheetLibrary(cfg)
     rc = reviewmod._review_cfg(cfg)
     comp = g.components.get(ref)
-    own = lib.slugs_for_mpn(comp.mpn) if comp else []
+    own = lib.slugs_for_mpn(conspec.part_key(comp)) if comp else []
     return reviewmod.ReviewSession(g, conspec.lookup(cfg), lib, own,
                                    rc["page_budget"], rc["neighbor_budget"])
 

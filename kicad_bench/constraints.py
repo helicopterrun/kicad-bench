@@ -41,9 +41,9 @@ def _bom_mpns(cfg: cfgmod.Config,
     g = g or graphmod.build(cfg.root_sch)
     seen: dict[str, None] = {}
     for ref in sorted(g.components):
-        mpn = g.components[ref].mpn
-        if mpn:
-            seen.setdefault(mpn)
+        key = conspec.part_key(g.components[ref])
+        if key:
+            seen.setdefault(key)
     return list(seen)
 
 

@@ -241,11 +241,12 @@ class ReviewSession:
 
     def _get_constraints(self, ref: str):
         c = self.g.components.get(ref)
-        if not c or not c.mpn:
+        key = conspec.part_key(c) if c else ""
+        if not key:
             return f"no MPN known for {ref!r}"
-        cons = self.lookup(c.mpn)
+        cons = self.lookup(key)
         if not cons:
-            return f"no constraints ingested for {c.mpn!r}"
+            return f"no constraints ingested for {key!r}"
         return json.dumps({k: v for k, v in cons.items() if k != "_dir"},
                           sort_keys=True)
 
@@ -458,7 +459,7 @@ def run_review(cfg: cfgmod.Config, client, model: str,
     rc = _review_cfg(cfg)
     refs = select_ics(g, rc["min_pins"], only)
     graph_summary = _graph_summary(g)
-    all_slugs = {ref: lib.slugs_for_mpn(g.components[ref].mpn)
+    all_slugs = {ref: lib.slugs_for_mpn(conspec.part_key(g.components[ref]))
                  for ref in g.components}
 
     usage_path = Path(cfg.root) / ".audit-cache" / "review-usage.jsonl"
@@ -598,7 +599,7 @@ def run_review_claude_code(cfg: cfgmod.Config, model: str | None = None,
     rc = _review_cfg(cfg)
     refs = select_ics(g, rc["min_pins"], only)
     graph_summary = _graph_summary(g)
-    all_slugs = {ref: lib.slugs_for_mpn(g.components[ref].mpn)
+    all_slugs = {ref: lib.slugs_for_mpn(conspec.part_key(g.components[ref]))
                  for ref in g.components}
 
     usage_path = Path(cfg.root) / ".audit-cache" / "review-usage.jsonl"

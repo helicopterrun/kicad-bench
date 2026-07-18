@@ -149,3 +149,14 @@ def test_lcsc_bridge_expands_slug_parts(monkeypatch, tmp_path):
     ]})
     sp = cmod._slug_to_parts(cfg, lm)
     assert sp == {"c16772datasheet": ["C16772", "CL05B224KO5NNNC"]}
+
+
+def test_part_key_value_fallback():
+    from types import SimpleNamespace as C
+    # MPN wins when present
+    assert conspec.part_key(C(mpn="SN75LVDS83BDGG", value="x")) == "SN75LVDS83BDGG"
+    # part-number-looking Value fills in for a missing MPN field
+    assert conspec.part_key(C(mpn="", value="TPS65150PWPR")) == "TPS65150PWPR"
+    # ordinary values never masquerade as part numbers
+    for v in ("100nF", "MCU", "Barrel_Jack", "4.7uH", "220nF 16V X7R", ""):
+        assert conspec.part_key(C(mpn="", value=v)) == "", v
