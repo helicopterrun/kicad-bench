@@ -10,11 +10,7 @@ import argparse
 import os
 import sys
 
-<<<<<<< HEAD
-from . import __version__, audit, datasheet, libsearch, pricing, release_freeze, sch_live, scaffold, sidecar, stage
-=======
-from . import __version__, audit, constraints, datasheet, libsearch, release_freeze, review, sch_live, scaffold, sidecar, stage
->>>>>>> origin/main
+from . import __version__, audit, constraints, datasheet, libsearch, pricing, release_freeze, review, sch_live, scaffold, sidecar, stage
 from . import init as init_cmd
 from .core import cli
 from .quality import (approved_parts, block_review, cap_derating, commit_gate,
