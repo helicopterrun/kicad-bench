@@ -95,9 +95,9 @@ def _fake_cfg(tmp_path):
 
 
 def test_claude_cmd_shape():
-    cmd = review._claude_cmd("PROMPT", Path("/x/mcp.json"), "claude-opus-4-8")
+    cmd = review._claude_cmd(Path("/x/mcp.json"), "claude-opus-4-8")
     assert cmd[0].endswith("claude")     # resolved path (daemon PATHs lack ~/.local/bin)
-    assert cmd[1:3] == ["-p", "PROMPT"]
+    assert cmd[1] == "-p"                # prompt arrives on stdin, not argv
     assert "--strict-mcp-config" in cmd
     allowed = cmd[cmd.index("--allowedTools") + 1]
     assert "mcp__kbreview__submit_review" in allowed
@@ -105,7 +105,7 @@ def test_claude_cmd_shape():
     assert "Bash" in disallowed and "Read" in disallowed
     assert cmd[-2:] == ["--model", "claude-opus-4-8"]
     # no model -> no --model flag
-    assert "--model" not in review._claude_cmd("p", Path("/x"), None)
+    assert "--model" not in review._claude_cmd(Path("/x"), None)
 
 
 def test_run_review_claude_code_ok_and_isolated(tmp_path, monkeypatch):

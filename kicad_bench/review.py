@@ -537,9 +537,11 @@ def claude_bin() -> str | None:
     return str(home) if home.is_file() else None
 
 
-def _claude_cmd(prompt: str, mcp_cfg: Path, model: str | None) -> list[str]:
+def _claude_cmd(mcp_cfg: Path, model: str | None) -> list[str]:
+    # NOTE: the prompt is passed on STDIN, not argv — big graph summaries can
+    # exceed the kernel argv limit
     allowed = ",".join(f"mcp__kbreview__{t['name']}" for t in TOOLS)
-    cmd = [claude_bin() or "claude", "-p", prompt,
+    cmd = [claude_bin() or "claude", "-p",
            "--append-system-prompt", SYSTEM_PROMPT,
            "--mcp-config", str(mcp_cfg), "--strict-mcp-config",
            "--allowedTools", allowed,
@@ -565,7 +567,7 @@ def review_component_claude_code(cfg: cfgmod.Config, ref: str, prompt: str,
                      "--config", str(cfg.path), "--ref", ref,
                      "--out", str(out)],
         }}}))
-        proc = subprocess.run(_claude_cmd(prompt, mcp_cfg, model),
+        proc = subprocess.run(_claude_cmd(mcp_cfg, model), input=prompt,
                               capture_output=True, text=True,
                               cwd=cfg.root, timeout=CLAUDE_TIMEOUT)
         try:

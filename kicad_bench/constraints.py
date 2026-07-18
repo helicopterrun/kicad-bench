@@ -363,7 +363,8 @@ def _client():
 
 def _text_pages_for(manifest: dict, pages: list[str]) -> list[int]:
     """1-based pages worth sending as text: ratings sections ± 1 page; whole
-    doc when it's small."""
+    doc when it's small; the first pages when the section classifier found
+    nothing (a large doc with zero text context extracts nothing)."""
     total_chars = sum(len(p) for p in pages)
     if total_chars <= SMALL_DOC_CHARS:
         return list(range(1, len(pages) + 1))
@@ -373,7 +374,10 @@ def _text_pages_for(manifest: dict, pages: list[str]) -> list[int]:
         for p in sections.get(key, []):
             want.update({p - 1, p, p + 1})
     want.update(sections.get("pinout", []))
-    return sorted(p for p in want if 1 <= p <= len(pages))
+    out = sorted(p for p in want if 1 <= p <= len(pages))
+    if not out:
+        out = list(range(1, min(8, len(pages)) + 1))
+    return out
 
 
 def _pinout_images(cfg: cfgmod.Config, index_dir: Path,
@@ -500,11 +504,14 @@ def extract_one_claude_code(cfg: cfgmod.Config, index_dir: Path, manifest: dict,
                      "(the text-layer tables above are unreliable for pin tables):")
         parts.extend(f"  page {pg}: {path}" for pg, path in pngs)
     from .review import claude_bin
+    # prompt goes on STDIN — a big datasheet's inlined pages can exceed the
+    # kernel argv limit (E2BIG on the STM32 reference manuals)
     proc = subprocess.run(
-        [claude_bin() or "claude", "-p", "\n\n".join(parts),
+        [claude_bin() or "claude", "-p",
          "--json-schema", json.dumps(_EXTRACT_SCHEMA),
          "--allowedTools", "Read", "--strict-mcp-config",
          "--output-format", "json", "--model", model],
+        input="\n\n".join(parts),
         capture_output=True, text=True, timeout=900)
     meta = json.loads(proc.stdout)
     if meta.get("is_error"):
