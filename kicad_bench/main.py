@@ -10,7 +10,7 @@ import argparse
 import os
 import sys
 
-from . import __version__, audit, constraints, datasheet, libsearch, release_freeze, review, sch_live, scaffold, sidecar, stage
+from . import __version__, audit, constraints, datasheet, libsearch, pricing, release_freeze, review, sch_live, scaffold, sidecar, stage
 from . import init as init_cmd
 from .core import cli
 from .quality import (approved_parts, block_review, cap_derating, commit_gate,
@@ -26,6 +26,7 @@ _TOOLS = [
     audit, sidecar, stage, datasheet,                            # consolidated audit + live web sidecar + lock-aware queue + datasheet viewer
     sch_live,                                                    # live schematic summary over the IPC API (shells to kb-ipc add-on)
     libsearch,                                                   # FTS over installed symbol/footprint libs
+    pricing,                                                     # rough multi-vendor board cost estimate
     erc_triage, netlist_audit, block_review, approved_parts, commit_gate,  # Priority 1
     ksir_sync,                                                   # .ksir <-> sheet drift gate
     symbol_style, sch_readability,                               # library + sheet layout rule gates
