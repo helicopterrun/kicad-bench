@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from kicad_bench import review, review_mcp
-from tests.test_review import FakeLib, _graph, FINDING
+from test_review import FakeLib, _graph, FINDING   # sibling test module (pytest adds tests/ to sys.path)
 
 
 def _server(tmp_path, own=("mcu-ds",)):
@@ -96,7 +96,8 @@ def _fake_cfg(tmp_path):
 
 def test_claude_cmd_shape():
     cmd = review._claude_cmd("PROMPT", Path("/x/mcp.json"), "claude-opus-4-8")
-    assert cmd[:3] == ["claude", "-p", "PROMPT"]
+    assert cmd[0].endswith("claude")     # resolved path (daemon PATHs lack ~/.local/bin)
+    assert cmd[1:3] == ["-p", "PROMPT"]
     assert "--strict-mcp-config" in cmd
     allowed = cmd[cmd.index("--allowedTools") + 1]
     assert "mcp__kbreview__submit_review" in allowed
