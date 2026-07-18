@@ -13,8 +13,9 @@ import sys
 from . import __version__, audit, datasheet, libsearch, release_freeze, sch_live, scaffold, sidecar, stage
 from . import init as init_cmd
 from .core import cli
-from .quality import (approved_parts, block_review, commit_gate, erc_triage,
-                      ksir_sync, netlist_audit, symbol_style, sch_readability)
+from .quality import (approved_parts, block_review, cap_derating, commit_gate,
+                      erc_triage, ksir_sync, led_current, netlist_audit,
+                      pin_mux, symbol_style, sch_readability)
 from .layout import (dfm_preflight, diffpair_audit, dru_guard, dru_lint,
                      netclass_coverage, netclass_sync, release_prep,
                      route_coverage, stackup_sync, track_conformance)
@@ -28,6 +29,7 @@ _TOOLS = [
     erc_triage, netlist_audit, block_review, approved_parts, commit_gate,  # Priority 1
     ksir_sync,                                                   # .ksir <-> sheet drift gate
     symbol_style, sch_readability,                               # library + sheet layout rule gates
+    cap_derating, led_current, pin_mux,                          # datasheet-grounded deterministic checks
     netclass_coverage, netclass_sync, dfm_preflight, stackup_sync,  # Priority 2
     release_prep, dru_lint,
     diffpair_audit, track_conformance, route_coverage, dru_guard,   # Priority 3: routed-geometry audits
