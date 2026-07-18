@@ -116,3 +116,36 @@ def test_gates_use_lookup_end_to_end(tmp_path):
     )
     res = cap_derating.check(g, lookup=conspec.lookup(cfg))
     assert res.n_errors == 1   # 5V across an extracted 4V rating
+
+
+# ---------------------------------------------------------------------------
+# constraints.py helpers — the LCSC->MPN designator bridge
+# ---------------------------------------------------------------------------
+
+def test_lcsc_bridge_expands_slug_parts(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from kicad_bench import constraints as cmod
+    from kicad_bench import datasheet as dsmod
+    from kicad_bench.core import graph as graphmod
+
+    # BOM: designator C103 -> LCSC C16772; schematic: C103 -> MPN CL05B224KO5NNNC
+    monkeypatch.setattr(dsmod, "_read_xlsx_rows", lambda p: [
+        ["Comment", "Designator", "LCSC PN"],
+        ["220nF", "C103, C104", "C16772"],
+    ])
+    g = graphmod.build_from(
+        {"N1": ["C103.1"]}, {("C103", "1"): "N1"},
+        [{"reference": "C103", "value": "220nF", "mpn": "CL05B224KO5NNNC"}])
+    bom_file = tmp_path / "bom.xlsx"; bom_file.write_text("x")
+    cfg = SimpleNamespace(bom=bom_file, root=tmp_path, root_sch=None, raw={})
+
+    lm = cmod._lcsc_to_mpns(cfg, g)
+    assert lm == {"C16772": {"CL05B224KO5NNNC"}}
+
+    # parts_overview links the datasheet only to the LCSC id; the bridge adds the MPN
+    monkeypatch.setattr(dsmod, "parts_overview", lambda c: {"parts": [
+        {"part": "C16772", "lcsc": "C16772",
+         "datasheet": {"slug": "c16772datasheet"}},
+    ]})
+    sp = cmod._slug_to_parts(cfg, lm)
+    assert sp == {"c16772datasheet": ["C16772", "CL05B224KO5NNNC"]}

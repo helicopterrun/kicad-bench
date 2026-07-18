@@ -18,7 +18,6 @@ from __future__ import annotations
 import base64
 import json
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -36,15 +35,52 @@ SMALL_DOC_CHARS = 40_000     # below this, send the whole datasheet text
 # Shared helpers
 # ---------------------------------------------------------------------------
 
-def _bom_mpns(cfg: cfgmod.Config) -> list[str]:
+def _bom_mpns(cfg: cfgmod.Config,
+              g: graphmod.DesignGraph | None = None) -> list[str]:
     """Distinct MPNs on the schematic (via the design graph's component parse)."""
-    g = graphmod.build(cfg.root_sch)
+    g = g or graphmod.build(cfg.root_sch)
     seen: dict[str, None] = {}
     for ref in sorted(g.components):
         mpn = g.components[ref].mpn
         if mpn:
             seen.setdefault(mpn)
     return list(seen)
+
+
+def _lcsc_to_mpns(cfg: cfgmod.Config,
+                  g: graphmod.DesignGraph) -> dict[str, set[str]]:
+    """LCSC id -> schematic MPN(s), bridged on the reference designator — the one
+    field the BOM ('Designator' + 'LCSC' columns) and the schematic share. This is
+    how a datasheet linked only to an LCSC id (Imported CAD dirs, JLC BOMs) reaches
+    the MPN the gates look up."""
+    if not cfg.bom or not Path(cfg.bom).exists():
+        return {}
+    rows = dsmod._read_xlsx_rows(Path(cfg.bom))
+    if not rows:
+        return {}
+    header = [h.strip().lower() for h in rows[0]]
+
+    def col(*needles: str) -> int | None:
+        for i, h in enumerate(header):
+            if any(n in h for n in needles):
+                return i
+        return None
+
+    d_i, l_i = col("designator", "reference"), col("lcsc")
+    if d_i is None or l_i is None:
+        return {}
+    out: dict[str, set[str]] = {}
+    for row in rows[1:]:
+        if len(row) <= max(d_i, l_i):
+            continue
+        lcsc = (row[l_i] or "").strip()
+        if not lcsc:
+            continue
+        for ref in (r.strip() for r in (row[d_i] or "").replace(";", ",").split(",")):
+            comp = g.components.get(ref)
+            if comp and comp.mpn:
+                out.setdefault(lcsc.upper(), set()).add(comp.mpn)
+    return out
 
 
 def _entries(cfg: cfgmod.Config) -> list[tuple[Path, dict]]:
@@ -64,8 +100,33 @@ def _entries(cfg: cfgmod.Config) -> list[tuple[Path, dict]]:
     return out
 
 
-def _mpns_for(manifest: dict, bom_mpns: list[str]) -> list[str]:
-    """The MPN list for a constraints file: the manifest's own + matching BOM MPNs."""
+def _slug_to_parts(cfg: cfgmod.Config,
+                   lcsc_map: dict[str, set[str]] | None = None) -> dict[str, list[str]]:
+    """slug -> [BOM/work-list part names] via the existing parts⋈datasheets join
+    (registry → source_url → LCSC dir → name match), expanded through the
+    LCSC→MPN designator bridge. This is what makes LCSC-named PDFs (whose
+    manifest `mpn` is filename junk) resolvable to the MPNs the gates look up."""
+    out: dict[str, list[str]] = {}
+    try:
+        for p in dsmod.parts_overview(cfg).get("parts", []):
+            ds = p.get("datasheet")
+            if not (ds and ds.get("slug") and p.get("part")):
+                continue
+            names = out.setdefault(ds["slug"], [])
+            names.append(p["part"])
+            lcsc = (p.get("lcsc") or p["part"]).upper()
+            for mpn in sorted((lcsc_map or {}).get(lcsc, ())):
+                if mpn not in names:
+                    names.append(mpn)
+    except Exception:       # the join must never break constraints commands
+        pass
+    return out
+
+
+def _mpns_for(manifest: dict, bom_mpns: list[str],
+              linked: list[str] | None = None) -> list[str]:
+    """The MPN list for a constraints file: the manifest's own + matching BOM
+    MPNs + the parts the datasheet join linked to it."""
     mpns: dict[str, None] = {}
     own = manifest.get("mpn") or ""
     if own:
@@ -73,6 +134,8 @@ def _mpns_for(manifest: dict, bom_mpns: list[str]) -> list[str]:
     for bm in bom_mpns:
         if own and conspec.mpn_matches(bm, own):
             mpns.setdefault(bm)
+    for part in linked or []:
+        mpns.setdefault(part)
     return list(mpns)
 
 
@@ -89,15 +152,29 @@ def _is_current(index_dir: Path, manifest: dict) -> bool:
 
 
 def _select(entries: list[tuple[Path, dict]], query: str | None,
-            bom_mpns: list[str]) -> list[tuple[Path, dict]]:
-    if not query:
+            bom_mpns: list[str], slug_parts: dict[str, list[str]],
+            everything: bool = False) -> list[tuple[Path, dict]]:
+    """Target datasheets for seed/extract. With an MPN query: fuzzy-match it.
+    Without: only datasheets that resolve to a BOM/work-list part (skips project
+    briefs, EVM guides, app notes — the LLM-cost guard); --all lifts that."""
+    if query:
+        q = conspec.norm_mpn(query)
+        out = [(d, m) for d, m in entries
+               if q in conspec.norm_mpn(m.get("mpn") or "")
+               or any(q in conspec.norm_mpn(x)
+                      for x in _mpns_for(m, bom_mpns, slug_parts.get(d.name)))]
+        if not out:
+            sys.exit(f"error: no ingested datasheet matches {query!r}")
+        return out
+    if everything:
         return entries
-    q = conspec.norm_mpn(query)
     out = [(d, m) for d, m in entries
-           if q in conspec.norm_mpn(m.get("mpn") or "")
-           or any(q in conspec.norm_mpn(x) for x in _mpns_for(m, bom_mpns))]
-    if not out:
-        sys.exit(f"error: no ingested datasheet matches {query!r}")
+           if slug_parts.get(d.name)
+           or any(conspec.mpn_matches(bm, m.get("mpn") or "") for bm in bom_mpns)]
+    skipped = len(entries) - len(out)
+    if skipped:
+        print(f"  ({skipped} ingested doc(s) not linked to any BOM part — "
+              f"skipped; use --all to include)")
     return out
 
 
@@ -106,8 +183,11 @@ def _select(entries: list[tuple[Path, dict]], query: str | None,
 # ---------------------------------------------------------------------------
 
 def _cmd_status(cfg: cfgmod.Config, args) -> int:
-    bom = _bom_mpns(cfg)
+    g = graphmod.build(cfg.root_sch)
+    bom = _bom_mpns(cfg, g)
     entries = _entries(cfg)
+    slug_parts = _slug_to_parts(cfg, _lcsc_to_mpns(cfg, g))
+    linked_parts = {p for parts in slug_parts.values() for p in parts}
     find = conspec.lookup(cfg)
     print(f"BOM: {len(bom)} MPN(s); ingested datasheets: {len(entries)}\n")
     n_cov = 0
@@ -119,8 +199,9 @@ def _cmd_status(cfg: cfgmod.Config, args) -> int:
             npins = len(cons.get("pins", []))
             print(f"  ✓ {mpn:32s} {tag:9s} {npins} pin(s)")
         else:
-            has_ds = any(conspec.mpn_matches(mpn, m.get("mpn") or "")
-                         for _, m in entries)
+            has_ds = (mpn in linked_parts
+                      or any(conspec.mpn_matches(mpn, m.get("mpn") or "")
+                             for _, m in entries))
             note = "datasheet ingested — run seed/extract" if has_ds else "no datasheet ingested"
             print(f"  · {mpn:32s} {note}")
     print(f"\n{n_cov}/{len(bom)} BOM MPN(s) have constraints")
@@ -141,8 +222,11 @@ def _cmd_show(cfg: cfgmod.Config, args) -> int:
 # ---------------------------------------------------------------------------
 
 def _cmd_seed(cfg: cfgmod.Config, args) -> int:
-    bom = _bom_mpns(cfg)
-    targets = _select(_entries(cfg), getattr(args, "mpn", None), bom)
+    g = graphmod.build(cfg.root_sch)
+    bom = _bom_mpns(cfg, g)
+    slug_parts = _slug_to_parts(cfg, _lcsc_to_mpns(cfg, g))
+    targets = _select(_entries(cfg), getattr(args, "mpn", None), bom, slug_parts,
+                      everything=getattr(args, "all", False))
     n_new = n_skip = n_fail = 0
     for index_dir, manifest in targets:
         if not args.force and _is_current(index_dir, manifest):
@@ -170,7 +254,7 @@ def _cmd_seed(cfg: cfgmod.Config, args) -> int:
             continue
         conspec.save(index_dir, {
             "schema": conspec.SCHEMA_VERSION,
-            "mpns": _mpns_for(manifest, bom),
+            "mpns": _mpns_for(manifest, bom, slug_parts.get(index_dir.name)),
             "datasheet_sha256": manifest.get("sha256"),
             "extracted_by": "heuristic",
             "model": None,
@@ -316,7 +400,8 @@ def _pinout_images(cfg: cfgmod.Config, index_dir: Path,
 
 
 def extract_one(client, model: str, cfg: cfgmod.Config, index_dir: Path,
-                manifest: dict, bom: list[str]) -> dict:
+                manifest: dict, bom: list[str],
+                linked: list[str] | None = None) -> dict:
     """One LLM extraction call -> saved constraints dict."""
     pages = _page_texts(index_dir)
     text_pages = _text_pages_for(manifest, pages)
@@ -324,7 +409,7 @@ def extract_one(client, model: str, cfg: cfgmod.Config, index_dir: Path,
         "type": "text",
         "text": f"Datasheet: {manifest.get('mpn')} "
                 f"({manifest.get('page_count')} pages). Extract constraints for "
-                f"MPN(s): {', '.join(_mpns_for(manifest, bom))}.",
+                f"MPN(s): {', '.join(_mpns_for(manifest, bom, linked))}.",
     }]
     for p in text_pages:
         content.append({"type": "text",
@@ -342,7 +427,8 @@ def extract_one(client, model: str, cfg: cfgmod.Config, index_dir: Path,
         messages=[{"role": "user", "content": content}],
     )
     text = next(b.text for b in response.content if b.type == "text")
-    data = _finish_extraction(index_dir, manifest, bom, json.loads(text), model)
+    data = _finish_extraction(index_dir, manifest, bom, json.loads(text), model,
+                              linked)
     u = response.usage
     print(f"  extracted {index_dir.name}: {len(data.get('pins', []))} pin(s), "
           f"{len(data.get('abs_max', []))} abs-max row(s) "
@@ -380,11 +466,12 @@ def _pinout_paths(index_dir: Path, manifest: dict) -> list[tuple[int, Path]]:
 
 
 def _finish_extraction(index_dir: Path, manifest: dict, bom: list[str],
-                       data: dict, model: str) -> dict:
+                       data: dict, model: str,
+                       linked: list[str] | None = None) -> dict:
     """Stamp provenance fields and save — shared by both extract backends."""
     data.update({
         "schema": conspec.SCHEMA_VERSION,
-        "mpns": _mpns_for(manifest, bom),
+        "mpns": _mpns_for(manifest, bom, linked),
         "datasheet_sha256": manifest.get("sha256"),
         "extracted_by": "llm",
         "model": model,
@@ -394,14 +481,16 @@ def _finish_extraction(index_dir: Path, manifest: dict, bom: list[str],
 
 
 def extract_one_claude_code(cfg: cfgmod.Config, index_dir: Path, manifest: dict,
-                            bom: list[str], model: str) -> dict:
+                            bom: list[str], model: str,
+                            linked: list[str] | None = None) -> dict:
     """One extraction via `claude -p --json-schema` (subscription auth).
 
     Ratings sections go inline as text; pinout pages go as rendered PNG paths
     the session reads itself (Read is the only allowed tool)."""
     pages = _page_texts(index_dir)
     parts = [f"Datasheet: {manifest.get('mpn')} ({manifest.get('page_count')} pages). "
-             f"Extract constraints for MPN(s): {', '.join(_mpns_for(manifest, bom))}.",
+             f"Extract constraints for MPN(s): "
+             f"{', '.join(_mpns_for(manifest, bom, linked))}.",
              _EXTRACT_SYSTEM]
     for p in _text_pages_for(manifest, pages):
         parts.append(f"--- page {p} ---\n{pages[p - 1]}")
@@ -410,8 +499,9 @@ def extract_one_claude_code(cfg: cfgmod.Config, index_dir: Path, manifest: dict,
         parts.append("Rendered pinout page images — Read each of these files "
                      "(the text-layer tables above are unreliable for pin tables):")
         parts.extend(f"  page {pg}: {path}" for pg, path in pngs)
+    from .review import claude_bin
     proc = subprocess.run(
-        ["claude", "-p", "\n\n".join(parts),
+        [claude_bin() or "claude", "-p", "\n\n".join(parts),
          "--json-schema", json.dumps(_EXTRACT_SCHEMA),
          "--allowedTools", "Read", "--strict-mcp-config",
          "--output-format", "json", "--model", model],
@@ -422,7 +512,7 @@ def extract_one_claude_code(cfg: cfgmod.Config, index_dir: Path, manifest: dict,
     data = meta.get("structured_output")
     if data is None:
         data = json.loads(meta["result"])
-    out = _finish_extraction(index_dir, manifest, bom, data, model)
+    out = _finish_extraction(index_dir, manifest, bom, data, model, linked)
     print(f"  extracted {index_dir.name}: {len(out.get('pins', []))} pin(s), "
           f"{len(out.get('abs_max', []))} abs-max row(s) "
           f"[${meta.get('total_cost_usd', 0):.3f}]")
@@ -430,15 +520,19 @@ def extract_one_claude_code(cfg: cfgmod.Config, index_dir: Path, manifest: dict,
 
 
 def _cmd_extract(cfg: cfgmod.Config, args) -> int:
-    bom = _bom_mpns(cfg)
-    targets = _select(_entries(cfg), getattr(args, "mpn", None), bom)
+    g = graphmod.build(cfg.root_sch)
+    bom = _bom_mpns(cfg, g)
+    slug_parts = _slug_to_parts(cfg, _lcsc_to_mpns(cfg, g))
+    targets = _select(_entries(cfg), getattr(args, "mpn", None), bom, slug_parts,
+                      everything=getattr(args, "all", False))
     backend = args.backend or extract_backend(cfg)
     model = args.model or extract_model(cfg)
     if backend == "api":
         client = _client()
     elif backend == "claude-code":
-        if not shutil.which("claude"):
-            sys.exit("error: `claude` CLI not on PATH — install Claude Code or "
+        from .review import claude_bin
+        if not claude_bin():
+            sys.exit("error: `claude` CLI not found — install Claude Code or "
                      "use --backend api with an ANTHROPIC_API_KEY")
         client = None
     else:
@@ -452,10 +546,12 @@ def _cmd_extract(cfg: cfgmod.Config, args) -> int:
             n_skip += 1
             continue
         try:
+            linked = slug_parts.get(index_dir.name)
             if backend == "claude-code":
-                extract_one_claude_code(cfg, index_dir, manifest, bom, model)
+                extract_one_claude_code(cfg, index_dir, manifest, bom, model,
+                                        linked)
             else:
-                extract_one(client, model, cfg, index_dir, manifest, bom)
+                extract_one(client, model, cfg, index_dir, manifest, bom, linked)
             n_new += 1
         except Exception as e:            # per-datasheet isolation
             n_fail += 1
@@ -485,10 +581,14 @@ def add_parser(sub):
     sh.add_argument("mpn")
     sd = ssub.add_parser("seed", help="heuristic pin-table seed (no API key)")
     sd.add_argument("mpn", nargs="?", help="limit to datasheets matching this MPN")
+    sd.add_argument("--all", action="store_true",
+                    help="include docs not linked to any BOM part")
     sd.add_argument("--force", action="store_true")
     ex = ssub.add_parser("extract",
                          help="LLM extraction (claude-code CLI by default; --backend api)")
     ex.add_argument("mpn", nargs="?", help="limit to datasheets matching this MPN")
+    ex.add_argument("--all", action="store_true",
+                    help="include docs not linked to any BOM part")
     ex.add_argument("--force", action="store_true")
     ex.add_argument("--backend", choices=["claude-code", "api"],
                     help="model backend (default: [llm].backend or claude-code)")

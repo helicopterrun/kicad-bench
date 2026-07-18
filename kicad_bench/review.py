@@ -527,9 +527,19 @@ it through mcp__kbreview__read_datasheet. Do not use any other tool. Finish by \
 calling mcp__kbreview__submit_review exactly once."""
 
 
+def claude_bin() -> str | None:
+    """The claude CLI, tolerating minimal daemon PATHs (systemd services don't
+    have ~/.local/bin, where the CLI installs)."""
+    found = shutil.which("claude")
+    if found:
+        return found
+    home = Path.home() / ".local" / "bin" / "claude"
+    return str(home) if home.is_file() else None
+
+
 def _claude_cmd(prompt: str, mcp_cfg: Path, model: str | None) -> list[str]:
     allowed = ",".join(f"mcp__kbreview__{t['name']}" for t in TOOLS)
-    cmd = ["claude", "-p", prompt,
+    cmd = [claude_bin() or "claude", "-p", prompt,
            "--append-system-prompt", SYSTEM_PROMPT,
            "--mcp-config", str(mcp_cfg), "--strict-mcp-config",
            "--allowedTools", allowed,
@@ -637,8 +647,8 @@ def run_review_auto(cfg: cfgmod.Config, model: str | None = None,
     if backend != "claude-code":
         sys.exit(f"error: unknown review backend {backend!r} "
                  "(expected 'claude-code' or 'api')")
-    if not shutil.which("claude"):
-        sys.exit("error: `claude` CLI not on PATH — install Claude Code or use "
+    if not claude_bin():
+        sys.exit("error: `claude` CLI not found — install Claude Code or use "
                  "--backend api with an ANTHROPIC_API_KEY")
     return run_review_claude_code(cfg, model, only=only, progress=progress)
 
