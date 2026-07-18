@@ -496,7 +496,20 @@ def run_review(cfg: cfgmod.Config, client, model: str,
 
 
 def _finish(cfg: cfgmod.Config, ics: list[dict], model: str | None) -> dict:
-    """Dedup + persist the review artifact — shared by both backends."""
+    """Dedup + persist the review artifact — shared by both backends.
+
+    A subset run (--ref) merges into the existing artifact instead of
+    clobbering the other ICs' findings."""
+    out_path = Path(cfg.root) / ".cockpit" / "review.json"
+    if out_path.is_file():
+        try:
+            prev = json.loads(out_path.read_text())
+            reviewed = {ic["ref"] for ic in ics}
+            ics = ics + [ic for ic in prev.get("ics", [])
+                         if ic.get("ref") not in reviewed]
+            ics.sort(key=lambda ic: ic.get("ref", ""))
+        except (OSError, json.JSONDecodeError):
+            pass
     dedup_across(ics)
     # newest mtime across ALL sheets — must match BoardState.sch_mtime(), else
     # the cockpit would report a fresh review as stale whenever a child sheet
@@ -510,9 +523,8 @@ def _finish(cfg: cfgmod.Config, ics: list[dict], model: str | None) -> dict:
         "model": model or "claude-code default",
         "ics": ics,
     }
-    out = Path(cfg.root) / ".cockpit" / "review.json"
-    out.parent.mkdir(exist_ok=True)
-    out.write_text(json.dumps(report, indent=2) + "\n")
+    out_path.parent.mkdir(exist_ok=True)
+    out_path.write_text(json.dumps(report, indent=2) + "\n")
     return report
 
 

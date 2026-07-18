@@ -296,3 +296,22 @@ def test_to_result_severities(tmp_path):
     res = review.to_result(report)
     assert res.n_errors == 1
     assert any(f.severity == "info" and "failed" in f.message for f in res.findings)
+
+
+def test_finish_merges_subset_into_existing_artifact(tmp_path):
+    """--ref runs must not clobber the other ICs' findings in review.json."""
+    cfg = _fake_cfg(tmp_path)
+    prev = {"model": "m", "sch_mtime": 0, "ics": [
+        {"ref": "U1", "status": "ok", "findings": [{"severity": "info",
+         "message": "keep me", "why": "", "pages": [], "recommendation": ""}]},
+        {"ref": "U5", "status": "failed", "error": "old", "findings": []},
+    ]}
+    out = tmp_path / ".cockpit" / "review.json"
+    out.parent.mkdir()
+    out.write_text(json.dumps(prev))
+
+    report = review._finish(cfg, [{"ref": "U5", "status": "ok", "findings": []}], "m2")
+    refs = [ic["ref"] for ic in report["ics"]]
+    assert refs == ["U1", "U5"]
+    assert report["ics"][1]["status"] == "ok"          # U5 replaced
+    assert report["ics"][0]["findings"][0]["message"] == "keep me"
