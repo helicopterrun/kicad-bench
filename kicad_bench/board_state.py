@@ -43,6 +43,8 @@ class BoardState:
         self._audit_running = False        # background audit in flight?
         self._audit_error: str | None = None
         self._audit_hydrated = False       # loaded the disk-persisted result yet?
+        self._review_running = False       # background LLM review in flight?
+        self._review_error: str | None = None
         self.sch_cache: bytes | None = None
         self.sch_cache_mtime = None
         # 2D PCB preview (fast, synchronous, board-mtime cached) — keyed by side
@@ -203,6 +205,60 @@ class BoardState:
         except Exception:  # noqa: BLE001
             pass
         return {"commits": commits, "last_diff": last_diff}
+
+    # -- datasheet review (kb review) — clone of the audit peek/state/bg trio --
+
+    def _review_disk(self) -> Path:
+        # committed review artifact (written by review.run_review), unlike the
+        # regenerable .audit-cache — page-cited findings travel with the design
+        return self.cfg.root / ".cockpit" / "review.json"
+
+    def review_peek(self) -> dict:
+        """Report the last review WITHOUT triggering a run.
+        status: ready | stale | running | error | none."""
+        with self.lock:
+            if self._review_running:
+                return {"status": "running"}
+            if self._review_error is not None:
+                return {"status": "error", "error": self._review_error}
+        p = self._review_disk()
+        if not p.is_file():
+            return {"status": "none"}
+        try:
+            rec = json.loads(p.read_text())
+        except (OSError, json.JSONDecodeError):
+            return {"status": "error", "error": "unreadable review.json"}
+        fresh = abs(rec.get("sch_mtime", 0) - self.sch_mtime()) < 1e-6
+        return {"status": "ready" if fresh else "stale", "stale": not fresh, **rec}
+
+    def review_state(self, force: bool = False) -> dict:
+        """Kick off `kb review` on a background daemon thread; the client polls
+        review_peek until it flips to ready. Needs the llm extra + API key —
+        failures surface as status:error, never crash the thread."""
+        peek = self.review_peek()
+        if not force and peek["status"] == "ready":
+            return peek
+        with self.lock:
+            if self._review_running:
+                return {"status": "running"}
+            self._review_running = True
+            self._review_error = None
+        threading.Thread(target=self._review_bg, daemon=True).start()
+        return {"status": "running"}
+
+    def _review_bg(self):
+        err = None
+        try:
+            import anthropic
+            from . import review as reviewmod
+            client = anthropic.Anthropic()
+            reviewmod.run_review(self.cfg, client, reviewmod.review_model(self.cfg),
+                                 progress=lambda *a: None)
+        except Exception as e:  # noqa: BLE001 — surface, never crash the thread
+            err = str(e)
+        with self.lock:
+            self._review_error = err
+            self._review_running = False
 
     def sch_mtime(self):
         """Newest mtime across all sheets, so editing ANY child sheet invalidates the
