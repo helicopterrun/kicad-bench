@@ -21,7 +21,7 @@ next board. One CLI (`kb`), five tiers:
 
 Plus the working surfaces: **`kb audit`** (everything at once), **`kb datasheet`**
 (harvest/ingest/read PDFs cheaply), **`kb lib-search`**, **`kb sch-live`**, **`kb
-stage`**, **`kb sidecar`**, and **`kb doctor`**.
+stage`**, **`kb cockpit`**, **`kb sidecar`**, and **`kb doctor`**.
 
 ## The read/write boundary
 
@@ -56,6 +56,7 @@ s-expression reader). Optional extras:
 pip install -e '.[xlsx]'   # openpyxl — .xlsx BOM support
 pip install -e '.[llm]'    # anthropic — only for `--backend api`; the default
                            # claude-code backend needs no extra and no API key
+pip install -e '.[web]'    # FastAPI + Uvicorn — optional multi-board Cockpit
 ```
 
 Every command takes `--config PATH`; without it, the tool searches upward from the
@@ -75,10 +76,8 @@ checks**, **Rules & config**, and **Layout & DFM** sections, with a "fix next" e
 digest. The individual commands below are for targeted checks; `--full` prints every
 finding.
 
-The same audit powers the live dashboards: the built-in `kb sidecar`, and the
-[Cockpit](../kicad-parts) (`kp cockpit`) — the multi-board FastAPI/Vue dashboard that
-superseded the sidecar on this bench and adds the Review tab, previews, parts/BOM
-views, and notes. `kicad_bench/board_state.py` is the shared engine both consume.
+The same audit powers both live dashboards: the built-in stdlib `kb sidecar` and the
+optional FastAPI/Vue `kb cockpit`. `kicad_bench/board_state.py` is their shared engine.
 
 ---
 
@@ -472,15 +471,32 @@ extractor.
 
 # Live surfaces & utilities
 
+### `kb cockpit`
+
+The product-grade local workspace for repeated board work. It provides multi-board
+navigation, live SSE status, audit and cited review findings, schematic and PCB previews,
+parts/datasheet coverage, the assembled BOM, staged jobs, and release readiness:
+
+```sh
+pip install -e '.[web]'
+kb cockpit --config /path/to/kicad-bench.toml   # http://127.0.0.1:8766
+```
+
+The cockpit binds to loopback by default because the Stage workspace can execute queued
+local commands. A non-loopback `--host` requires an explicit `--allow-network` and should
+only be used on a trusted network.
+
+The production Vue/TypeScript assets are included in the Python package. Frontend
+development lives under `kicad_bench/cockpit/web/`; run `pnpm install`, then `pnpm dev`
+with `kb cockpit` on port 8766. `pnpm build` refreshes the packaged
+`kicad_bench/cockpit/static/` bundle.
+
 ### `kb sidecar`
 
 The built-in, stdlib-only live dashboard: one self-contained dark page with the audit
-verdict, a "fix next" list, and schematic/PCB/datasheet/parts tabs; re-audits when
-the board file changes. On this bench it's been **superseded by the Cockpit**
-(`kp cockpit` from [`kicad-parts`](../kicad-parts)) — a multi-board FastAPI/Vue
-dashboard with the same audit plus the Review tab, SSE live updates, BOM/sourcing
-views, and per-board notes. Both consume the same `board_state.py` engine, so the
-sidecar remains the zero-dependency fallback.
+verdict, a "fix next" list, and schematic/PCB/datasheet/parts tabs; re-audits when the
+board file changes. It remains the zero-extra-dependency fallback. Use `kb cockpit` for
+the richer multi-board workspace; both consume the same `board_state.py` engine.
 
 ### `kb stage`
 

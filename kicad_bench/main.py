@@ -10,7 +10,8 @@ import argparse
 import os
 import sys
 
-from . import __version__, audit, constraints, datasheet, libsearch, release_freeze, review, sch_live, scaffold, sidecar, stage
+from . import (__version__, audit, cockpit, constraints, datasheet, libsearch,
+               release_freeze, review, sch_live, scaffold, sidecar, stage)
 from . import init as init_cmd
 from .core import cli
 from .quality import (approved_parts, block_review, cap_derating, commit_gate,
@@ -23,7 +24,7 @@ from .layout import (dfm_preflight, diffpair_audit, dru_guard, dru_lint,
 _TOOLS = [
     scaffold, release_freeze,                                    # Priority 0: new product monorepo + release freeze
     init_cmd,                                                    # one-command bring-up for a new board
-    audit, sidecar, stage, datasheet,                            # consolidated audit + live web sidecar + lock-aware queue + datasheet viewer
+    audit, cockpit, sidecar, stage, datasheet,                   # dashboards + lock-aware queue + datasheet viewer
     sch_live,                                                    # live schematic summary over the IPC API (shells to kb-ipc add-on)
     libsearch,                                                   # FTS over installed symbol/footprint libs
     erc_triage, netlist_audit, block_review, approved_parts, commit_gate,  # Priority 1

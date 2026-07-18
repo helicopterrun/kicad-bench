@@ -7,9 +7,9 @@ in-process and keyed by a file mtime, guarded by one `threading.Lock`, so openin
 tabs (or polling) never triggers a redundant `kicad-cli` run. Read-only — it never writes a
 design file.
 
-This was extracted from `sidecar.py` so the legacy stdlib `kb sidecar` and the FastAPI
-cockpit (`kp cockpit`) share ONE implementation. It must stay free of any `kicad_parts`
-import so `kicad_bench` remains a leaf the cockpit can depend on (no dependency cycle).
+This was extracted from `sidecar.py` so the legacy stdlib `kb sidecar` and the optional
+FastAPI/Vue `kb cockpit` share one implementation. It stays free of web-framework imports
+so the core CLI and sidecar retain their small dependency surface.
 
 Discipline preserved from the original:
   * the ~2s 2D SVG renders OUTSIDE the lock, so it never stalls audit/mtime requests;

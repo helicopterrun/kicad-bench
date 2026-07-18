@@ -19,6 +19,7 @@ dependencies = ["sexpdata"]
 [project.optional-dependencies]
 xlsx = ["openpyxl"]   # read/write BOM .xlsx (bom_assembly, datasheet BOM export, release-prep)
 llm = ["anthropic"]   # kb constraints extract + kb review (Claude API; needs ANTHROPIC_API_KEY)
+web = ["fastapi>=0.110", "uvicorn>=0.29"]  # optional multi-board Cockpit SPA
 
 [project.scripts]
 kb = "kicad_bench.main:main"
@@ -27,4 +28,9 @@ kb = "kicad_bench.main:main"
 include = ["kicad_bench*"]
 
 [tool.setuptools.package-data]
-kicad_bench = ["templates/*.yml", "templates/*.yaml"]
+kicad_bench = [
+  "templates/*.yml",
+  "templates/*.yaml",
+  "cockpit/static/*.html",
+  "cockpit/static/assets/*",
+]
