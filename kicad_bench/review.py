@@ -21,7 +21,10 @@ import base64
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -44,9 +47,24 @@ _SEVERITIES = ("error", "warning", "info")
 # Config
 # ---------------------------------------------------------------------------
 
-def review_model(cfg: cfgmod.Config) -> str:
+DEFAULT_BACKEND = "claude-code"      # subscription auth via the claude CLI; "api" opt-in
+CLAUDE_TIMEOUT = 1800                # seconds per IC (headless runs can take minutes)
+# Builtin Claude Code tools the reviewer must not use — everything goes through
+# the kbreview MCP tools so page budgets and cited-page tracking stay enforced.
+_CLAUDE_DISALLOWED = ("Bash,Read,Write,Edit,Glob,Grep,WebFetch,WebSearch,"
+                      "NotebookEdit,Task,TodoWrite")
+
+
+def review_model(cfg: cfgmod.Config) -> str | None:
+    """Configured model override, or None (run_review_auto falls back to DEFAULT_MODEL)."""
     raw = cfg.raw.get("llm", {}) if isinstance(cfg.raw, dict) else {}
-    return os.environ.get("KB_REVIEW_MODEL") or raw.get("review_model") or DEFAULT_MODEL
+    return os.environ.get("KB_REVIEW_MODEL") or raw.get("review_model")
+
+
+def review_backend(cfg: cfgmod.Config) -> str:
+    raw = cfg.raw.get("llm", {}) if isinstance(cfg.raw, dict) else {}
+    return (os.environ.get("KB_REVIEW_BACKEND") or raw.get("backend")
+            or DEFAULT_BACKEND)
 
 
 def _review_cfg(cfg: cfgmod.Config) -> dict:
@@ -473,17 +491,156 @@ def run_review(cfg: cfgmod.Config, client, model: str,
                         "status": "failed", "error": str(e), "findings": []})
             progress(f"  {ref} FAILED: {e}")
 
+    return _finish(cfg, ics, model)
+
+
+def _finish(cfg: cfgmod.Config, ics: list[dict], model: str | None) -> dict:
+    """Dedup + persist the review artifact — shared by both backends."""
     dedup_across(ics)
+    # newest mtime across ALL sheets — must match BoardState.sch_mtime(), else
+    # the cockpit would report a fresh review as stale whenever a child sheet
+    # is newer than the root
+    root_sch = Path(cfg.root_sch)
+    sch_mtime = max((p.stat().st_mtime for p in root_sch.parent.glob("*.kicad_sch")),
+                    default=root_sch.stat().st_mtime)
     report = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        "sch_mtime": Path(cfg.root_sch).stat().st_mtime,
-        "model": model,
+        "sch_mtime": sch_mtime,
+        "model": model or "claude-code default",
         "ics": ics,
     }
     out = Path(cfg.root) / ".cockpit" / "review.json"
     out.parent.mkdir(exist_ok=True)
     out.write_text(json.dumps(report, indent=2) + "\n")
     return report
+
+
+# ---------------------------------------------------------------------------
+# claude-code backend — drive `claude -p` with the same tools over MCP
+# ---------------------------------------------------------------------------
+
+_TOOL_DISCIPLINE = """\
+
+Use ONLY the mcp__kbreview__* tools — the design graph, extracted constraints, \
+and datasheet pages are all behind them, and citing a page requires having read \
+it through mcp__kbreview__read_datasheet. Do not use any other tool. Finish by \
+calling mcp__kbreview__submit_review exactly once."""
+
+
+def _claude_cmd(prompt: str, mcp_cfg: Path, model: str | None) -> list[str]:
+    allowed = ",".join(f"mcp__kbreview__{t['name']}" for t in TOOLS)
+    cmd = ["claude", "-p", prompt,
+           "--append-system-prompt", SYSTEM_PROMPT,
+           "--mcp-config", str(mcp_cfg), "--strict-mcp-config",
+           "--allowedTools", allowed,
+           "--disallowedTools", _CLAUDE_DISALLOWED,
+           "--output-format", "json"]
+    if model:
+        cmd += ["--model", model]
+    return cmd
+
+
+def review_component_claude_code(cfg: cfgmod.Config, ref: str, prompt: str,
+                                 model: str | None) -> tuple[dict | None, dict]:
+    """One IC via `claude -p` + the kbreview MCP server.
+
+    Returns (session state {findings, pages_read} | None, run meta)."""
+    workdir = Path(tempfile.mkdtemp(prefix=f"kbreview-{ref}-"))
+    try:
+        out = workdir / "session.json"
+        mcp_cfg = workdir / "mcp.json"
+        mcp_cfg.write_text(json.dumps({"mcpServers": {"kbreview": {
+            "type": "stdio", "command": sys.executable,
+            "args": ["-m", "kicad_bench.review_mcp",
+                     "--config", str(cfg.path), "--ref", ref,
+                     "--out", str(out)],
+        }}}))
+        proc = subprocess.run(_claude_cmd(prompt, mcp_cfg, model),
+                              capture_output=True, text=True,
+                              cwd=cfg.root, timeout=CLAUDE_TIMEOUT)
+        try:
+            meta = json.loads(proc.stdout)
+        except (json.JSONDecodeError, ValueError):
+            meta = {"is_error": True,
+                    "result": (proc.stderr or proc.stdout or "")[-2000:]}
+        state = None
+        if out.is_file():
+            try:
+                state = json.loads(out.read_text())
+            except (OSError, json.JSONDecodeError):
+                pass
+        if state is None and proc.returncode != 0:
+            raise RuntimeError(f"claude exited {proc.returncode}: "
+                               f"{(proc.stderr or '')[-500:]}")
+        return state, meta
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def run_review_claude_code(cfg: cfgmod.Config, model: str | None = None,
+                           only: str | None = None, progress=print) -> dict:
+    """Whole-run orchestration on the claude-code backend — same selection,
+    normalization, persistence, and usage logging as the API path."""
+    g = graphmod.build(cfg.root_sch)
+    lib = DatasheetLibrary(cfg)
+    rc = _review_cfg(cfg)
+    refs = select_ics(g, rc["min_pins"], only)
+    graph_summary = _graph_summary(g)
+    all_slugs = {ref: lib.slugs_for_mpn(g.components[ref].mpn)
+                 for ref in g.components}
+
+    usage_path = Path(cfg.root) / ".audit-cache" / "review-usage.jsonl"
+    usage_path.parent.mkdir(exist_ok=True)
+
+    ics: list[dict] = []
+    for ref in refs:
+        own = all_slugs.get(ref, [])
+        prompt = (graph_summary + "\n\n" + _ic_ask(g, ref, own, all_slugs)
+                  + _TOOL_DISCIPLINE)
+        progress(f"reviewing {ref} ({g.components[ref].mpn or g.components[ref].value}) "
+                 f"via claude-code…")
+        try:
+            state, meta = review_component_claude_code(cfg, ref, prompt, model)
+            raw = (state or {}).get("findings")
+            pages_read = {tuple(p) for p in (state or {}).get("pages_read", [])}
+            findings = normalize(raw or [], pages_read)
+            status = "ok" if raw is not None else "no_submission"
+            ics.append({"ref": ref, "mpn": g.components[ref].mpn,
+                        "status": status, "findings": findings,
+                        "pages_read": sorted([list(p) for p in pages_read]),
+                        "usage": (meta or {}).get("usage") or {}})
+            with usage_path.open("a") as f:
+                f.write(json.dumps({"ts": time.time(), "ref": ref,
+                                    "backend": "claude-code",
+                                    "model": model or "default",
+                                    "cost_usd": (meta or {}).get("total_cost_usd"),
+                                    "duration_ms": (meta or {}).get("duration_ms")})
+                        + "\n")
+        except Exception as e:                  # per-IC isolation
+            ics.append({"ref": ref, "mpn": g.components[ref].mpn,
+                        "status": "failed", "error": str(e), "findings": []})
+            progress(f"  {ref} FAILED: {e}")
+
+    return _finish(cfg, ics, model)
+
+
+def run_review_auto(cfg: cfgmod.Config, model: str | None = None,
+                    only: str | None = None, backend: str | None = None,
+                    progress=print) -> dict:
+    """Backend dispatch: claude-code (default, subscription auth) or api."""
+    backend = backend or review_backend(cfg)
+    # always resolve to an explicit model — never inherit the user's claude CLI
+    # session default (which may be a pricier tier)
+    model = model or review_model(cfg) or DEFAULT_MODEL
+    if backend == "api":
+        return run_review(cfg, _client(), model, only=only, progress=progress)
+    if backend != "claude-code":
+        sys.exit(f"error: unknown review backend {backend!r} "
+                 "(expected 'claude-code' or 'api')")
+    if not shutil.which("claude"):
+        sys.exit("error: `claude` CLI not on PATH — install Claude Code or use "
+                 "--backend api with an ANTHROPIC_API_KEY")
+    return run_review_claude_code(cfg, model, only=only, progress=progress)
 
 
 def to_result(report: dict) -> Result:
@@ -523,16 +680,20 @@ def run(args) -> int:
     cfg = cfgmod.load_or_exit(args.config, getattr(args, "board", None))
     if not cfg.root_sch or not Path(cfg.root_sch).exists():
         sys.exit(f"error: schematic not found: {cfg.root_sch}")
-    model = args.model or review_model(cfg)
-    report = run_review(cfg, _client(), model, only=args.ref)
+    report = run_review_auto(cfg, model=args.model, only=args.ref,
+                             backend=args.backend)
     return render_and_exit(to_result(report))
 
 
 def add_parser(sub):
     p = sub.add_parser("review",
-                       help="datasheet-grounded per-IC review (LLM; needs ANTHROPIC_API_KEY)")
+                       help="datasheet-grounded per-IC review (claude-code CLI by default; "
+                            "--backend api uses ANTHROPIC_API_KEY)")
     p.add_argument("--ref", help="review a single IC (default: all with >= [review].min_pins pins)")
-    p.add_argument("--model", help=f"override model (default {DEFAULT_MODEL})")
+    p.add_argument("--backend", choices=["claude-code", "api"],
+                   help=f"model backend (default: [llm].backend or {DEFAULT_BACKEND})")
+    p.add_argument("--model", help="override model (claude-code: CLI session default; "
+                                   f"api: {DEFAULT_MODEL})")
     p.add_argument("--board", help="which board (multi-board configs)")
     p.add_argument("--config", help=f"path to {cfgmod.CONFIG_NAME}")
     p.set_defaults(func=run)

@@ -18,6 +18,8 @@ from __future__ import annotations
 import base64
 import json
 import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -260,6 +262,12 @@ def extract_model(cfg: cfgmod.Config) -> str:
         or DEFAULT_EXTRACT_MODEL
 
 
+def extract_backend(cfg: cfgmod.Config) -> str:
+    raw = cfg.raw.get("llm", {}) if isinstance(cfg.raw, dict) else {}
+    return (os.environ.get("KB_EXTRACT_BACKEND") or raw.get("backend")
+            or "claude-code")
+
+
 def _client():
     try:
         import anthropic
@@ -294,7 +302,7 @@ def _pinout_images(cfg: cfgmod.Config, index_dir: Path,
         return []
     cache = root / dsmod.CACHE_DIRNAME
     blocks: list[dict] = []
-    for page in (manifest.get("sections") or {}).get("pinout", [])[:MAX_PINOUT_IMAGES]:
+    for page in _pinout_page_nums(manifest):
         try:
             png = dsmod._render(pdf, page, IMAGE_DPI, cache)
         except Exception:
@@ -334,7 +342,46 @@ def extract_one(client, model: str, cfg: cfgmod.Config, index_dir: Path,
         messages=[{"role": "user", "content": content}],
     )
     text = next(b.text for b in response.content if b.type == "text")
-    data = json.loads(text)
+    data = _finish_extraction(index_dir, manifest, bom, json.loads(text), model)
+    u = response.usage
+    print(f"  extracted {index_dir.name}: {len(data.get('pins', []))} pin(s), "
+          f"{len(data.get('abs_max', []))} abs-max row(s) "
+          f"[{u.input_tokens} in / {u.output_tokens} out tok]")
+    return data
+
+
+def _pinout_page_nums(manifest: dict) -> list[int]:
+    """Pages worth rendering for the pin table: the classified pinout pages, or —
+    when the section classifier found none — the first pages of the document
+    (pin diagrams and signal-name tables almost always live up front)."""
+    pages = (manifest.get("sections") or {}).get("pinout") or []
+    if not pages:
+        n = manifest.get("page_count") or 0
+        pages = list(range(1, min(3, n) + 1))
+    return pages[:MAX_PINOUT_IMAGES]
+
+
+def _pinout_paths(index_dir: Path, manifest: dict) -> list[tuple[int, Path]]:
+    """(page, rendered-PNG path) for the pinout pages — for backends that read
+    image files themselves (claude-code) rather than taking base64 blocks."""
+    pdf_rel = manifest.get("pdf")
+    root = index_dir.parent.parent
+    pdf = (root / pdf_rel) if pdf_rel else None
+    if not pdf or not pdf.is_file():
+        return []
+    cache = root / dsmod.CACHE_DIRNAME
+    out = []
+    for page in _pinout_page_nums(manifest):
+        try:
+            out.append((page, dsmod._render(pdf, page, IMAGE_DPI, cache)))
+        except Exception:
+            continue
+    return out
+
+
+def _finish_extraction(index_dir: Path, manifest: dict, bom: list[str],
+                       data: dict, model: str) -> dict:
+    """Stamp provenance fields and save — shared by both extract backends."""
     data.update({
         "schema": conspec.SCHEMA_VERSION,
         "mpns": _mpns_for(manifest, bom),
@@ -343,18 +390,59 @@ def extract_one(client, model: str, cfg: cfgmod.Config, index_dir: Path,
         "model": model,
     })
     conspec.save(index_dir, data)
-    u = response.usage
-    print(f"  extracted {index_dir.name}: {len(data.get('pins', []))} pin(s), "
-          f"{len(data.get('abs_max', []))} abs-max row(s) "
-          f"[{u.input_tokens} in / {u.output_tokens} out tok]")
     return data
+
+
+def extract_one_claude_code(cfg: cfgmod.Config, index_dir: Path, manifest: dict,
+                            bom: list[str], model: str) -> dict:
+    """One extraction via `claude -p --json-schema` (subscription auth).
+
+    Ratings sections go inline as text; pinout pages go as rendered PNG paths
+    the session reads itself (Read is the only allowed tool)."""
+    pages = _page_texts(index_dir)
+    parts = [f"Datasheet: {manifest.get('mpn')} ({manifest.get('page_count')} pages). "
+             f"Extract constraints for MPN(s): {', '.join(_mpns_for(manifest, bom))}.",
+             _EXTRACT_SYSTEM]
+    for p in _text_pages_for(manifest, pages):
+        parts.append(f"--- page {p} ---\n{pages[p - 1]}")
+    pngs = _pinout_paths(index_dir, manifest)
+    if pngs:
+        parts.append("Rendered pinout page images — Read each of these files "
+                     "(the text-layer tables above are unreliable for pin tables):")
+        parts.extend(f"  page {pg}: {path}" for pg, path in pngs)
+    proc = subprocess.run(
+        ["claude", "-p", "\n\n".join(parts),
+         "--json-schema", json.dumps(_EXTRACT_SCHEMA),
+         "--allowedTools", "Read", "--strict-mcp-config",
+         "--output-format", "json", "--model", model],
+        capture_output=True, text=True, timeout=900)
+    meta = json.loads(proc.stdout)
+    if meta.get("is_error"):
+        raise RuntimeError(str(meta.get("result", "claude run failed"))[:500])
+    data = meta.get("structured_output")
+    if data is None:
+        data = json.loads(meta["result"])
+    out = _finish_extraction(index_dir, manifest, bom, data, model)
+    print(f"  extracted {index_dir.name}: {len(out.get('pins', []))} pin(s), "
+          f"{len(out.get('abs_max', []))} abs-max row(s) "
+          f"[${meta.get('total_cost_usd', 0):.3f}]")
+    return out
 
 
 def _cmd_extract(cfg: cfgmod.Config, args) -> int:
     bom = _bom_mpns(cfg)
     targets = _select(_entries(cfg), getattr(args, "mpn", None), bom)
-    client = _client()
+    backend = args.backend or extract_backend(cfg)
     model = args.model or extract_model(cfg)
+    if backend == "api":
+        client = _client()
+    elif backend == "claude-code":
+        if not shutil.which("claude"):
+            sys.exit("error: `claude` CLI not on PATH — install Claude Code or "
+                     "use --backend api with an ANTHROPIC_API_KEY")
+        client = None
+    else:
+        sys.exit(f"error: unknown extract backend {backend!r}")
     n_new = n_skip = n_fail = 0
     for index_dir, manifest in targets:
         existing = conspec.load_dir(index_dir)
@@ -364,12 +452,16 @@ def _cmd_extract(cfg: cfgmod.Config, args) -> int:
             n_skip += 1
             continue
         try:
-            extract_one(client, model, cfg, index_dir, manifest, bom)
+            if backend == "claude-code":
+                extract_one_claude_code(cfg, index_dir, manifest, bom, model)
+            else:
+                extract_one(client, model, cfg, index_dir, manifest, bom)
             n_new += 1
         except Exception as e:            # per-datasheet isolation
             n_fail += 1
             print(f"  FAILED {index_dir.name}: {e}", file=sys.stderr)
-    print(f"{n_new} extracted, {n_skip} current, {n_fail} failed (model {model})")
+    print(f"{n_new} extracted, {n_skip} current, {n_fail} failed "
+          f"({backend}, model {model})")
     return 0 if n_fail == 0 else 1
 
 
@@ -394,9 +486,12 @@ def add_parser(sub):
     sd = ssub.add_parser("seed", help="heuristic pin-table seed (no API key)")
     sd.add_argument("mpn", nargs="?", help="limit to datasheets matching this MPN")
     sd.add_argument("--force", action="store_true")
-    ex = ssub.add_parser("extract", help="LLM extraction (needs ANTHROPIC_API_KEY)")
+    ex = ssub.add_parser("extract",
+                         help="LLM extraction (claude-code CLI by default; --backend api)")
     ex.add_argument("mpn", nargs="?", help="limit to datasheets matching this MPN")
     ex.add_argument("--force", action="store_true")
+    ex.add_argument("--backend", choices=["claude-code", "api"],
+                    help="model backend (default: [llm].backend or claude-code)")
     ex.add_argument("--model", help=f"override model (default {DEFAULT_EXTRACT_MODEL})")
 
     for x in (st, sh, sd, ex):

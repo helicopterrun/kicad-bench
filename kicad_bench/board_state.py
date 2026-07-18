@@ -249,11 +249,12 @@ class BoardState:
     def _review_bg(self):
         err = None
         try:
-            import anthropic
             from . import review as reviewmod
-            client = anthropic.Anthropic()
-            reviewmod.run_review(self.cfg, client, reviewmod.review_model(self.cfg),
-                                 progress=lambda *a: None)
+            # backend dispatch: claude-code CLI (subscription auth) by default,
+            # anthropic API if [llm].backend = "api"
+            reviewmod.run_review_auto(self.cfg, progress=lambda *a: None)
+        except SystemExit as e:  # run_review_auto uses sys.exit for setup errors
+            err = str(e)
         except Exception as e:  # noqa: BLE001 — surface, never crash the thread
             err = str(e)
         with self.lock:
