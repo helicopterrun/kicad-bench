@@ -1,27 +1,33 @@
-"""imgdiff.py — pixel diff of two board renders (optional `[imgdiff]` extra).
+"""imgdiff.py — overlay two board renders (pixel path behind the `[imgdiff]` extra).
 
 `board_diff` answers *what* changed structurally. This answers *where* it changed, by
 overlaying two revisions of the same board: old-only copper in one colour, new-only in
 another, unchanged in grey. On a dense board that lands faster than reading a list of
 200 moved refs.
 
-The alignment is free rather than computed: `cli.export_pcb_pdf` uses
-`--page-size-mode 2 --exclude-drawing-sheet`, so every render is cropped to the board
-outline and two revisions of the same outline land on the same axes. Renders whose
-pixel dimensions differ (the board outline itself changed) are reported rather than
-stretched to fit — a scaled comparison would paint every trace as moved.
+Two renderers:
 
-Two renderers, because one of them isn't always available:
+* `overlay_svg` composes the two SVG exports directly — stdlib only, no rasterizer, no
+  Pillow. Both come from `--page-size-mode 2 --exclude-drawing-sheet`, so two revisions
+  of one outline share a viewBox and align with no transform.
+* `overlay` does a true pixel diff and reports how much of the board changed. It needs
+  a raster source, and kicad-cli has no 2D PNG export, so it goes board → PDF →
+  `pdftoppm` → PNG.
 
-* `overlay_svg` composes the two SVG exports directly — stdlib only, no rasterizer, and
-  it is the path that works everywhere `kicad-cli pcb export svg` does.
-* `overlay` does a true pixel diff and also reports *how much* of the board changed, but
-  it needs a raster source. kicad-cli has no 2D PNG export, so it goes board → PDF →
-  `pdftoppm` → PNG. **On a flatpak kicad-cli the PDF plotter requires the xdg document
-  portal**, which a headless container doesn't have (`Can't get document portal … Can't
-  mount path /run/user/0/doc`) — SVG export still works there, PDF and PS do not. So the
-  pixel path is for native KiCad installs, and `overlay_svg` is the fallback that always
-  runs rather than an inferior second choice.
+Two things about that raster path were learned the hard way and are guarded here:
+
+1. **Polarity is not fixed.** The SVG export uses the dark editor theme (light ink on a
+   dark canvas); the PDF plotter draws dark ink on a white page. A fixed threshold made
+   one of them read as ~100% ink, so every diff came out empty. `_ink` decides per image
+   from its mean luminance.
+2. **The PDF is not cropped.** `cli.export_pcb_pdf` cannot pass `--page-size-mode 2`
+   (the PCB PDF plotter silently emits nothing with it — see that function), so the
+   board arrives centred in a mostly-empty page inside a drawing sheet. `overlay` crops
+   to the union of both ink boxes, or the changed-pixel percentage would be measured
+   against the paper.
+
+Renders whose pixel dimensions differ (the page setup itself changed) are reported
+rather than stretched to fit — a scaled comparison would paint every trace as moved.
 
 Pillow is the one heavy dependency here, so it lives behind the `[imgdiff]` extra with a
 guarded import, per the dependency-light rule. `overlay_svg` and `board_diff` need
@@ -117,6 +123,26 @@ def pdf_to_png(pdf: bytes, dpi: int = 150) -> bytes:
         return pages[0].read_bytes()
 
 
+def _ink(img, threshold: int = 128):
+    """A 1-bit mask of "there is something drawn here", whatever the render's polarity.
+
+    Mean luminance decides: a mostly-bright image is dark ink on a white page (the PDF
+    plotter), a mostly-dark one is light ink on a dark canvas (the SVG editor theme).
+    """
+    hist = img.histogram()
+    mean = sum(i * hist[i] for i in range(256)) / max(1, sum(hist))
+    if mean > 127:                              # dark ink on a light page
+        return img.point(lambda v: 255 if v < threshold else 0, mode="1")
+    return img.point(lambda v: 255 if v >= threshold else 0, mode="1")
+
+
+def _union_bbox(a, b):
+    """The box covering both ink bounding boxes, or None if neither drew anything."""
+    if a and b:
+        return (min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3]))
+    return a or b
+
+
 def overlay(old_png: bytes, new_png: bytes,
             old_rgb=(255, 80, 80), new_rgb=(80, 200, 255)) -> tuple[bytes, dict]:
     """Overlay two renders; returns (PNG bytes, stats).
@@ -135,14 +161,27 @@ def overlay(old_png: bytes, new_png: bytes,
             f"renders differ in size ({a.size} vs {b.size}) — the board outline itself "
             "changed, so the two revisions cannot be overlaid pixel-for-pixel")
 
-    # Board renders are light-on-dark; treat "has ink" as the signal.
-    a_ink = a.point(lambda v: 255 if v > 40 else 0, mode="1")
-    b_ink = b.point(lambda v: 255 if v > 40 else 0, mode="1")
+    # Polarity is NOT fixed: the SVG export uses the dark editor theme (light ink on a
+    # dark canvas) while the PDF plotter draws dark ink on a white page. Assuming one
+    # made the other's background read as ink, so both images came out ~100% "ink" and
+    # every diff was empty. Decide per image from its mean luminance instead.
+    a_ink = _ink(a)
+    b_ink = _ink(b)
+
+    # Crop to what is actually drawn, in code rather than at the plotter: the PCB PDF
+    # export rejects `--page-size-mode 2` (see cli.export_pcb_pdf), so a small board
+    # arrives centred in a mostly-empty page with a drawing sheet around it. Without
+    # this the changed-pixel percentage is measured against the paper, not the board.
+    # The box is the UNION of both revisions, so geometry that only exists in one of
+    # them is never cropped away.
+    box = _union_bbox(a_ink.getbbox(), b_ink.getbbox())
+    if box:
+        a_ink, b_ink = a_ink.crop(box), b_ink.crop(box)
     only_old = ImageChops.logical_and(a_ink, ImageChops.invert(b_ink.convert("L")).convert("1"))
     only_new = ImageChops.logical_and(b_ink, ImageChops.invert(a_ink.convert("L")).convert("1"))
     both = ImageChops.logical_and(a_ink, b_ink)
 
-    out = Image.new("RGB", a.size, (16, 16, 20))
+    out = Image.new("RGB", a_ink.size, (16, 16, 20))
     out.paste((90, 90, 96), mask=both)
     out.paste(old_rgb, mask=only_old)
     out.paste(new_rgb, mask=only_new)
@@ -151,11 +190,11 @@ def overlay(old_png: bytes, new_png: bytes,
     # across versions and far cheaper than materialising every pixel.
     n_old = only_old.convert("L").histogram()[255]
     n_new = only_new.convert("L").histogram()[255]
-    total = a.size[0] * a.size[1]
+    total = a_ink.size[0] * a_ink.size[1]
     buf = io.BytesIO()
     out.save(buf, format="PNG")
     return buf.getvalue(), {
         "removed_px": n_old, "added_px": n_new, "total_px": total,
         "changed_pct": round(100.0 * (n_old + n_new) / total, 3) if total else 0.0,
-        "width": a.size[0], "height": a.size[1],
+        "width": a_ink.size[0], "height": a_ink.size[1],
     }

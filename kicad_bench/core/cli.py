@@ -190,7 +190,19 @@ def export_pcb_pdf(pcb: str | Path, side: str = "top") -> bytes:
     Exists because kicad-cli has no 2D PNG export for a board and nothing here can
     rasterize SVG — but the datasheet subsystem already shells to `pdftoppm`. So the
     revision-diff renderer goes board -> PDF -> PNG, reusing a converter we depend on
-    anyway. Same crop and layer set as the SVG path, so the two views line up.
+    anyway.
+
+    FOOTGUN, and the reason this doesn't mirror `export_pcb_svg`'s flags: the PCB **PDF**
+    plotter silently produces NO FILE when given `--page-size-mode 2` or
+    `--exclude-drawing-sheet` — exit code 0, empty output, and a red-herring
+    `Can't get document portal` line on stderr that is printed on every invocation and
+    means nothing. Either flag alone is enough to break it; the SVG plotter accepts both
+    happily, and `sch export pdf` is unaffected. So this renders at full page size with
+    the drawing sheet left in.
+
+    That costs nothing for the revision diff: both revisions render with identical flags
+    and the same page setup, so they stay pixel-aligned — the crop was only ever for
+    tightness. `imgdiff.overlay` still checks the two sizes match before comparing.
     """
     _require()
     if side == "bottom":
@@ -201,9 +213,7 @@ def export_pcb_pdf(pcb: str | Path, side: str = "top") -> bytes:
         out = f.name
     cmd = ["kicad-cli", "pcb", "export", "pdf",
            "--mode-single",
-           "--layers", layers,
-           "--page-size-mode", "2",
-           "--exclude-drawing-sheet"]
+           "--layers", layers]
     if mirror:
         cmd.append("--mirror")
     cmd += ["--output", out, str(pcb)]

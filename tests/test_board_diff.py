@@ -212,8 +212,11 @@ def test_pixel_overlay_classifies_added_removed_and_shared():
     new = png([(2, 2, 6, 6)])                     # 16 px, overlapping 2x2 = 4
     out, stats = imgdiff.overlay(old, new)
     assert stats["removed_px"] == 12 and stats["added_px"] == 12
-    assert stats["total_px"] == 100
-    assert stats["changed_pct"] == 24.0
+    # Cropped to the UNION of both ink boxes — (0,0,4,4) | (2,2,6,6) = 6x6 — so the
+    # percentage is measured against the drawn area, not the surrounding paper.
+    assert stats["total_px"] == 36
+    assert (stats["width"], stats["height"]) == (6, 6)
+    assert stats["changed_pct"] == round(100 * 24 / 36, 3)
     assert out[:8] == b"\x89PNG\r\n\x1a\n"
 
 

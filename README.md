@@ -206,11 +206,19 @@ of the same outline are pixel-aligned for free.
   changed. Needs the `[imgdiff]` extra (Pillow) plus `pdftoppm`, and goes board → PDF →
   PNG because kicad-cli has no 2D PNG export.
 
-**KiCad footgun it encodes.** A *flatpak* kicad-cli cannot export PDF or PS headlessly —
-its plotter needs the xdg document portal (`Can't get document portal … Can't mount
-path /run/user/0/doc`), which a container doesn't have. SVG export is unaffected. So
-the `.png` path is for native KiCad installs and the `.svg` overlay is the one that
-always runs; the error message says so rather than failing opaquely.
+**KiCad footgun it encodes.** The PCB **PDF** plotter silently emits *no file* when
+given `--page-size-mode 2` or `--exclude-drawing-sheet` — exit code 0, empty output.
+Either flag alone breaks it; the SVG plotter accepts both, and `sch export pdf` is
+unaffected. The `Can't get document portal` line on stderr is a red herring printed on
+every kicad-cli invocation and is **not** the cause. So `export_pcb_pdf` renders at full
+page size with the drawing sheet left in, and `imgdiff.overlay` crops to the union of
+both revisions' ink instead — otherwise the changed-pixel percentage would be measured
+against the paper rather than the board.
+
+**Render polarity is not fixed either.** The SVG export uses the dark editor theme
+(light ink on dark); the PDF plotter draws dark ink on white. A fixed ink threshold made
+one of them read as ~100% ink and every diff came out empty, so the mask is chosen per
+image from its mean luminance.
 
 ### Physics-grounded impedance (`core/ipc.py`, wired into `kb diffpair-audit`)
 
