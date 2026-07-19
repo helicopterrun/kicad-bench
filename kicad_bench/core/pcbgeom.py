@@ -158,6 +158,64 @@ class Zone:
 
 
 @dataclass
+class StackLayer:
+    """One physical layer of the board sandwich, in board order (top -> bottom)."""
+    name: str                          # "F.Cu", "dielectric 1", "F.Mask", ...
+    type: str = ""                     # "copper" | "core" | "prepreg" | "Top Solder Mask"
+    thickness: float | None = None     # mm
+    epsilon_r: float | None = None     # relative permittivity (dielectrics only)
+
+
+@dataclass
+class Stackup:
+    """The `(setup (stackup …))` block — the board's own physical cross-section.
+
+    This is the authoritative source for impedance geometry: it lives in the board
+    file, so it cannot drift from the design the way a parallel fab-config copy can.
+    Every field is optional; a missing one means "unknown", never a default.
+    """
+    layers: list[StackLayer] = field(default_factory=list)
+
+    def copper_layers(self) -> list[str]:
+        return [l.name for l in self.layers if l.type == "copper"]
+
+    def microstrip_geometry(self, layer: str = "F.Cu"):
+        """(h_mm, er, t_mm) for an outer layer over its nearest reference plane.
+
+        Walks inward from `layer` to the next copper layer, summing the dielectric
+        thickness between them and taking a thickness-weighted mean epsilon_r (a
+        prepreg+core sandwich is not a single material). Returns None if the layer
+        isn't in the stackup, has no copper layer inboard of it, or any term is
+        missing — callers must skip, never guess.
+        """
+        names = [l.name for l in self.layers]
+        if layer not in names:
+            return None
+        start = names.index(layer)
+        t = self.layers[start].thickness
+        if t is None:
+            return None
+        # Try inward-downward first, then inward-upward, so B.Cu resolves the same way
+        # F.Cu does without the caller knowing which side it's on.
+        for run in (self.layers[start + 1:], self.layers[:start][::-1]):
+            h_sum = 0.0
+            er_weighted = 0.0
+            for l in run:
+                if l.type == "copper":
+                    break
+                if l.thickness is None or l.epsilon_r is None:
+                    h_sum = 0.0
+                    break
+                h_sum += l.thickness
+                er_weighted += l.thickness * l.epsilon_r
+            else:
+                continue                     # ran off the edge: no reference plane
+            if h_sum > 0:
+                return h_sum, er_weighted / h_sum, t
+        return None
+
+
+@dataclass
 class Board:
     path: Path
     tracks: list[Track] = field(default_factory=list)
@@ -166,6 +224,7 @@ class Board:
     zones: list[Zone] = field(default_factory=list)
     footprints: dict[str, str] = field(default_factory=dict)  # ref -> fpid
     placements: dict[str, "Placement"] = field(default_factory=dict)  # ref -> Placement
+    stackup: "Stackup | None" = None                          # (setup (stackup …))
 
     # -- net views ----------------------------------------------------------
     @property
@@ -348,8 +407,34 @@ def parse(path: str | Path) -> Board:
             board.zones.append(Zone(_net_of_node(node, table), layers))
         elif kind == "footprint":
             _footprint(node, board, table)
+        elif kind == "setup":
+            board.stackup = _stackup(node)
 
     return board
+
+
+def _stackup(setup) -> "Stackup | None":
+    """Read `(setup (stackup (layer …) …))`, or None when the board has no stackup.
+
+    KiCad stores the physical layer sandwich in board order, top to bottom, with
+    dielectric thickness and epsilon_r on the substrate layers. Absent fields stay
+    None so consumers can skip rather than assume a default FR4.
+    """
+    st = sexp.first(setup, "stackup")
+    if st is None:
+        return None
+    out = Stackup()
+    for lay in sexp.children(st, "layer"):
+        if len(lay) < 2:
+            continue
+        ty = sexp.first(lay, "type")
+        out.layers.append(StackLayer(
+            name=sexp.sym(lay[1]),
+            type=sexp.sym(ty[1]) if ty and len(ty) >= 2 else "",
+            thickness=_num(lay, "thickness"),
+            epsilon_r=_num(lay, "epsilon_r"),
+        ))
+    return out if out.layers else None
 
 
 def _footprint(node, board: Board, table: dict[int, str]) -> None:

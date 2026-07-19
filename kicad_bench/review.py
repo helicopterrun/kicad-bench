@@ -164,7 +164,10 @@ TOOLS = [
                       "properties": {"ref": {"type": "string"}},
                       "required": ["ref"]}},
     {"name": "get_net",
-     "description": "A net's kind (power/gnd/signal), inferred voltage, and every (ref, pin) on it.",
+     "description": ("A net's kind (power/gnd/signal), its voltage with the provenance that "
+                     "established it (voltage_source: 'netname' = read off the net's own name, "
+                     "'vout' = a regulator's datasheet output voltage, null = unknown), and "
+                     "every (ref, pin) on it."),
      "input_schema": {"type": "object", "additionalProperties": False,
                       "properties": {"name": {"type": "string"}},
                       "required": ["name"]}},
@@ -226,6 +229,7 @@ class ReviewSession:
         if not n:
             return f"no net {name!r} in the design"
         return json.dumps({"name": n.name, "kind": n.kind, "voltage": n.voltage,
+                           "voltage_source": n.voltage_source,
                            "pins": n.pins}, sort_keys=True)
 
     def _find_connected(self, ref: str):
@@ -236,6 +240,7 @@ class ReviewSession:
             n = self.g.nets.get(net_name)
             out[net_name] = {"kind": n.kind if n else "signal",
                              "voltage": n.voltage if n else None,
+                             "voltage_source": n.voltage_source if n else None,
                              "peers": [f"{r}.{p}" for r, p in peers]}
         return json.dumps(out, sort_keys=True)
 
@@ -455,6 +460,7 @@ def run_review(cfg: cfgmod.Config, client, model: str,
                only: str | None = None, progress=print) -> dict:
     g = graphmod.build(cfg.root_sch)
     lookup = conspec.lookup(cfg)
+    graphmod.solve_rail_voltages(g, lookup)
     lib = DatasheetLibrary(cfg)
     rc = _review_cfg(cfg)
     refs = select_ics(g, rc["min_pins"], only)
@@ -607,6 +613,7 @@ def run_review_claude_code(cfg: cfgmod.Config, model: str | None = None,
     """Whole-run orchestration on the claude-code backend — same selection,
     normalization, persistence, and usage logging as the API path."""
     g = graphmod.build(cfg.root_sch)
+    graphmod.solve_rail_voltages(g, conspec.lookup(cfg))
     lib = DatasheetLibrary(cfg)
     rc = _review_cfg(cfg)
     refs = select_ics(g, rc["min_pins"], only)

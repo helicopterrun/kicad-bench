@@ -281,7 +281,15 @@ extracted item must cite the page number(s) it came from. For the pin table, \
 read the pinout page images (text-layer tables are unreliable); include every \
 alternate/peripheral function listed per pin. For ratings, prefer the absolute \
 maximum ratings and recommended operating conditions tables. If a field is not \
-stated in the provided pages, leave it out (empty list / omit optional field)."""
+stated in the provided pages, leave it out (empty list / omit optional field).
+
+`spec.vref` is the regulator's internal FEEDBACK REFERENCE voltage — the value the \
+error amplifier drives its FB/ADJ pin to, used as Vout = Vref*(1 + Rtop/Rbot). It is \
+typically 0.5-1.25 V and appears in the electrical-characteristics table as "Feedback \
+voltage", "Reference voltage" or "V_FB". Do NOT put the output voltage there, and do \
+NOT confuse it with `spec.vout`. A part with several feedback loops has several such \
+values: give the one for the main/positive FB pin, or null if that is ambiguous. \
+For anything that is not a regulator, `vref` is null."""
 
 _RATING_ITEM = {
     "type": "object", "additionalProperties": False,
@@ -320,9 +328,10 @@ _EXTRACT_SCHEMA = {
                 "if_max": {"type": ["number", "null"]},
                 "vin_max": {"type": ["number", "null"]},
                 "vout": {"type": ["number", "null"]},
+                "vref": {"type": ["number", "null"]},
             },
             "required": ["v_rating", "dielectric", "vf", "if_max",
-                         "vin_max", "vout"],
+                         "vin_max", "vout", "vref"],
         },
         "source_pages": {
             "type": "object", "additionalProperties": False,

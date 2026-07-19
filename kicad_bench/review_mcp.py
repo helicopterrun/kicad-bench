@@ -114,6 +114,7 @@ class Server:
 
 def build_session(cfg: cfgmod.Config, ref: str) -> reviewmod.ReviewSession:
     g = graphmod.build(cfg.root_sch)
+    graphmod.solve_rail_voltages(g, conspec.lookup(cfg))
     lib = reviewmod.DatasheetLibrary(cfg)
     rc = reviewmod._review_cfg(cfg)
     comp = g.components.get(ref)

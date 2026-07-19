@@ -18,6 +18,7 @@ dependencies = ["sexpdata"]
 
 [project.optional-dependencies]
 xlsx = ["openpyxl"]   # read/write BOM .xlsx (bom_assembly, datasheet BOM export, release-prep)
+imgdiff = ["pillow"]    # kb board-diff --image: pixel overlay of two board revisions
 llm = ["anthropic"]   # kb constraints extract + kb review (Claude API; needs ANTHROPIC_API_KEY)
 
 [project.scripts]

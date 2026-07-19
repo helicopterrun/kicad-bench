@@ -14,10 +14,10 @@ next board. One CLI (`kb`), five tiers:
 | Tier | Commands | What it covers |
 |------|----------|----------------|
 | **Priority 0 — lifecycle** | `scaffold`, `init`, `release-freeze` | product monorepo bring-up → frozen, tagged releases |
-| **Priority 1 — quality gates** | `erc-triage`, `netlist-audit`, `block-review`, `approved-parts`, `commit-gate`, `ksir-sync`, `symbol-style`, `sch-readability` | read-only schematic/library gates |
+| **Priority 1 — quality gates** | `erc-triage`, `netlist-audit`, `block-review`, `approved-parts`, `eco-drift`, `commit-gate`, `ksir-sync`, `symbol-style`, `sch-readability` | read-only schematic/library gates |
 | **Datasheet-grounded checks** | `cap-derating`, `led-current`, `pin-mux`, `constraints`, `review` | the semantic layer above ERC — deterministic checks + an LLM reviewer, both grounded in the manufacturer datasheets |
 | **Priority 2 — layout / DFM prep** | `netclass-coverage`, `netclass-sync`, `dfm-preflight`, `stackup-sync`, `release-prep`, `dru-lint` | pre-layout and pre-fab gates |
-| **Priority 3 — routed geometry** | `diffpair-audit`, `track-conformance`, `route-coverage`, `dru-guard` | as-routed copper audits DRC can't do |
+| **Priority 3 — routed geometry** | `diffpair-audit`, `track-conformance`, `route-coverage`, `dru-guard`, `board-diff` | as-routed copper audits DRC can't do |
 
 Plus the working surfaces: **`kb audit`** (everything at once), **`kb datasheet`**
 (harvest/ingest/read PDFs cheaply), **`kb lib-search`**, **`kb sch-live`**, **`kb
@@ -180,6 +180,85 @@ near-miss detection (difflib ≥ 0.85), designator-range enforcement (from
 `[approved_parts]`: missing MPN and unapproved MPN can each be error or warn. This is
 the `kb` side of the contract that [`kicad-parts`](../kicad-parts)' catalog kanban
 syncs into (`kp` promotes catalog rows → `approved_parts.csv`).
+
+### `kb board-diff <old-rev> [<new-rev>]`
+
+**Problem.** `kb changes` lists commits; nothing said what they did to the *board*.
+Reading a `.kicad_pcb` diff by eye is hopeless — nudging one footprint rewrites
+coordinates all over the file, and a re-pour rewrites megabytes of zone polygon.
+
+**What it does.** Answers the review question instead: which components appeared,
+vanished, changed footprint, moved or flipped (with offsets); which nets appeared,
+vanished or changed membership; how the copper totals moved. Pure set/dict math over
+the parsers that already exist. When the file differs but nothing structural does, it
+says exactly that rather than a flat "no change".
+
+**Never `git checkout`.** History is read with `git show <rev>:<path>`, which writes
+nothing — a checkout would clobber uncommitted work in the tree being reviewed. There
+is a regression test asserting the working tree is byte-identical afterwards.
+
+**`--image`.** Writes a colour-coded overlay of the two revisions (old red, new blue).
+Both renders come from `--page-size-mode 2 --exclude-drawing-sheet`, so two revisions
+of the same outline are pixel-aligned for free.
+* `--image out.svg` composes the two SVG exports — stdlib only, works anywhere
+  `kicad-cli pcb export svg` does.
+* `--image out.png` does a true pixel diff and reports what fraction of the board
+  changed. Needs the `[imgdiff]` extra (Pillow) plus `pdftoppm`, and goes board → PDF →
+  PNG because kicad-cli has no 2D PNG export.
+
+**KiCad footgun it encodes.** A *flatpak* kicad-cli cannot export PDF or PS headlessly —
+its plotter needs the xdg document portal (`Can't get document portal … Can't mount
+path /run/user/0/doc`), which a container doesn't have. SVG export is unaffected. So
+the `.png` path is for native KiCad installs and the `.svg` overlay is the one that
+always runs; the error message says so rather than failing opaquely.
+
+### Physics-grounded impedance (`core/ipc.py`, wired into `kb diffpair-audit`)
+
+`track-conformance` checks copper against a *config floor* — a number someone typed.
+`core/ipc.py` checks against the published models instead: closed-form IPC-2141
+microstrip/stripline and differential impedance, plus IPC-2221 current capacity.
+
+The geometry comes from the **board's own** `(setup (stackup ...))`, now parsed into
+`pcbgeom.Board.stackup` — dielectric height and epsilon_r per layer. The board file is
+the authoritative source, so it can't drift the way a parallel fab-config copy would,
+and no new config keys are needed. `diffpair-audit` already read
+`target_impedance_ohm` and only printed it; it now computes the pair's actual
+differential impedance and warns outside ±10%.
+
+Everything here is **mm-native** (the reference implementations in the wild are
+mils-native; mixing the two is a permanent bug source) and **warn-biased** — the IPC
+closed forms are curve fits good to roughly ±10%, so a computed value is evidence for
+a warning, never for an error.
+
+It skips rather than guessing when the model doesn't describe the geometry: no stackup,
+`w/h` outside the fit's 0.1–3.0 validity band, or a coplanar ground pour *closer* than
+the reference plane (then the pour sets the impedance, not the plane). That last rule
+is load-bearing — on a 2-layer board with a 1.51 mm dielectric and a 0.2 mm pour
+clearance the plain microstrip model reads 144 Ω against a 90 Ω target, which is a
+model mismatch, not a design error. On a thin-prepreg inner-ground stackup where the
+plane is nearer, the model holds and is used.
+
+### `kb eco-drift [sheet]`
+
+**Problem.** Nothing checked that the board still matches the *schematic*. A footprint
+added straight onto the PCB, a net renamed on one side only, or a pad dragged onto the
+wrong net all pass ERC, DRC and `route-coverage` — `netlist-audit` compares node counts
+against a committed baseline, not against the board.
+
+**What it does.** Reduces both domains to `net -> {"REF.PAD", ...}` and diffs them per
+direction: membership disagreements, schematic-only nets, board-only nets. Errors on
+real divergence; *warns* when the only difference is a component that simply isn't
+placed yet, so it stays usable mid-layout. A board with no netted pads reports one info
+line instead of screaming.
+
+**KiCad footgun it encodes.** Net names differ between the two exports in two ways.
+The netlist strips the one leading `/` on sheet-scoped names while the board keeps it —
+so the comparison strips exactly that, and *not* the leaf, since collapsing
+`/video/SW` to `SW` would alias distinct same-named nets on different sheets and hide
+the very drift this gate looks for. And KiCad escapes an interior `/` as `{slash}` in
+`unconnected-(...)` pseudo-net names (`unconnected-(J201-JTDO/SWO-Pad8)` on one side vs
+`...JTDO{slash}SWO-Pad8` on the other), which would otherwise diverge on every board;
+those pseudo-nets are filtered out entirely.
 
 ### `kb commit-gate`
 
