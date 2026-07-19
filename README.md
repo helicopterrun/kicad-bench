@@ -14,7 +14,7 @@ next board. One CLI (`kb`), five tiers:
 | Tier | Commands | What it covers |
 |------|----------|----------------|
 | **Priority 0 — lifecycle** | `scaffold`, `init`, `release-freeze` | product monorepo bring-up → frozen, tagged releases |
-| **Priority 1 — quality gates** | `erc-triage`, `netlist-audit`, `block-review`, `approved-parts`, `commit-gate`, `ksir-sync`, `symbol-style`, `sch-readability` | read-only schematic/library gates |
+| **Priority 1 — quality gates** | `erc-triage`, `netlist-audit`, `block-review`, `approved-parts`, `eco-drift`, `commit-gate`, `ksir-sync`, `symbol-style`, `sch-readability` | read-only schematic/library gates |
 | **Datasheet-grounded checks** | `cap-derating`, `led-current`, `pin-mux`, `constraints`, `review` | the semantic layer above ERC — deterministic checks + an LLM reviewer, both grounded in the manufacturer datasheets |
 | **Priority 2 — layout / DFM prep** | `netclass-coverage`, `netclass-sync`, `dfm-preflight`, `stackup-sync`, `release-prep`, `dru-lint` | pre-layout and pre-fab gates |
 | **Priority 3 — routed geometry** | `diffpair-audit`, `track-conformance`, `route-coverage`, `dru-guard` | as-routed copper audits DRC can't do |
@@ -180,6 +180,28 @@ near-miss detection (difflib ≥ 0.85), designator-range enforcement (from
 `[approved_parts]`: missing MPN and unapproved MPN can each be error or warn. This is
 the `kb` side of the contract that [`kicad-parts`](../kicad-parts)' catalog kanban
 syncs into (`kp` promotes catalog rows → `approved_parts.csv`).
+
+### `kb eco-drift [sheet]`
+
+**Problem.** Nothing checked that the board still matches the *schematic*. A footprint
+added straight onto the PCB, a net renamed on one side only, or a pad dragged onto the
+wrong net all pass ERC, DRC and `route-coverage` — `netlist-audit` compares node counts
+against a committed baseline, not against the board.
+
+**What it does.** Reduces both domains to `net -> {"REF.PAD", ...}` and diffs them per
+direction: membership disagreements, schematic-only nets, board-only nets. Errors on
+real divergence; *warns* when the only difference is a component that simply isn't
+placed yet, so it stays usable mid-layout. A board with no netted pads reports one info
+line instead of screaming.
+
+**KiCad footgun it encodes.** Net names differ between the two exports in two ways.
+The netlist strips the one leading `/` on sheet-scoped names while the board keeps it —
+so the comparison strips exactly that, and *not* the leaf, since collapsing
+`/video/SW` to `SW` would alias distinct same-named nets on different sheets and hide
+the very drift this gate looks for. And KiCad escapes an interior `/` as `{slash}` in
+`unconnected-(...)` pseudo-net names (`unconnected-(J201-JTDO/SWO-Pad8)` on one side vs
+`...JTDO{slash}SWO-Pad8` on the other), which would otherwise diverge on every board;
+those pseudo-nets are filtered out entirely.
 
 ### `kb commit-gate`
 

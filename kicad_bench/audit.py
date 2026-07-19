@@ -18,7 +18,7 @@ from pathlib import Path
 from .core import cli, config as cfgmod, pcbgeom, schparse
 from .core.report import Result, style
 from .core import graph as graphmod
-from .quality import (block_review, cap_derating, commit_gate, erc_triage,
+from .quality import (block_review, cap_derating, commit_gate, eco_drift, erc_triage,
                       ksir_sync, led_current, netlist_audit, pin_mux)
 from .layout import (diffpair_audit, dru_guard, dru_lint, netclass_coverage,
                      route_coverage, stackup_sync, track_conformance)
@@ -100,6 +100,7 @@ def run_all(cfg: cfgmod.Config) -> list[tuple[str, Result]]:
     # ---- Layout & DFM (shares one DRC run) ----
     if cfg.pcb and cfg.pcb.exists():
         board = pcbgeom.parse(cfg.pcb)
+        out.append(("Layout & DFM", eco_drift.crossref(counts, board)))
         out.append(("Layout & DFM", diffpair_audit.analyze(board, fab, 0.15, 0.02, 5.0)))
         out.append(("Layout & DFM", track_conformance.analyze(board, fab, 0.2)))
         try:
