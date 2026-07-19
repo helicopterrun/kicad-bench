@@ -193,14 +193,19 @@ def build_from(counts: dict[str, list[str]],
 # is set by the external divider, not by any single datasheet number.
 _OUT_PIN_NAMES = {"VOUT", "OUT", "VO"}
 
-# Feedback-sense pins whose divider sets a POSITIVE rail: Vout = Vref·(1 + Rtop/Rbot).
-_FB_PIN_NAMES = {"FB", "VFB", "ADJ", "VADJ", "FBP"}
-# Inverting sense pins use a different formula (V = -Vref·Rtop/Rbot) referenced to a
-# separate REF pin, and charge-pump loops often sense an intermediate node rather than
-# the rail they name. Getting either subtly wrong on a ± rail is exactly the false
-# number the review layer's downgrade-only discipline exists to prevent — so they are
-# recognised only in order to be skipped.
-_INVERTING_PIN_NAMES = {"FBN", "VFBN"}
+# The PRIMARY feedback-sense pin, whose divider sets a positive rail by
+# Vout = Vref·(1 + Rtop/Rbot). Only this one, because `spec.vref` is a single scalar.
+_FB_PIN_NAMES = {"FB", "VFB", "ADJ", "VADJ"}
+
+# Secondary loops on a multi-output part, recognised only in order to be SKIPPED:
+#   * FBN inverts — V = -Vref·Rtop/Rbot, referenced to a separate REF pin;
+#   * FBP is non-inverting but has its OWN reference, and often senses an intermediate
+#     node rather than the rail it appears to name.
+# Measured on a real TPS65150: its three loops use 1.146 V (FB), 1.214 V (FBP) and
+# 1.213 V (FBN). Reusing the one extracted `vref` across them put CPI at 17.5 V instead
+# of 18.5 V — a plausible, cited, wrong number, which is worse than no number. Solving
+# these needs per-pin references the constraints schema does not carry.
+_SECONDARY_FB_PIN_NAMES = {"FBN", "VFBN", "FBP", "VFBP"}
 
 _RESISTOR = re.compile(r"^R\d+$")
 _VOUT_SANE = (0.5, 60.0)          # outside this, treat the solve as nonsense and skip
@@ -312,7 +317,7 @@ def _solve_dividers(g: DesignGraph, lookup) -> int:
 
         for p in pins:
             name = (p.get("name") or "").strip().upper()
-            if name in _INVERTING_PIN_NAMES:
+            if name in _SECONDARY_FB_PIN_NAMES:
                 continue                      # recognised, deliberately not solved
             if name not in _FB_PIN_NAMES:
                 continue

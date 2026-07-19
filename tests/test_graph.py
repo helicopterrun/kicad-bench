@@ -256,9 +256,15 @@ def test_divider_falls_back_to_the_family_table():
     assert g.nets["AVDD"].voltage == pytest.approx(0.8 * (1 + 10000 / 2000), abs=0.01)
 
 
-def test_inverting_sense_pin_is_recognised_but_not_solved():
-    """FBN uses V = -Vref*Rtop/Rbot against a REF pin — a different circuit. Skip."""
-    g, lookup = _fb_graph(fb_pin="FBN")
+import pytest as _pytest
+
+
+@_pytest.mark.parametrize("pin", ["FBN", "FBP"])
+def test_secondary_feedback_loops_are_recognised_but_not_solved(pin):
+    """A multi-output part's other loops have their OWN references, which the single
+    scalar spec.vref cannot carry. Measured on a real TPS65150: FB 1.146 V, FBP
+    1.214 V, FBN 1.213 V — reusing one across all three put a rail 5.6% out."""
+    g, lookup = _fb_graph(fb_pin=pin)
     assert graph.solve_rail_voltages(g, lookup) == 0
     assert g.nets["AVDD"].voltage is None
 
