@@ -18,10 +18,12 @@ Discipline preserved from the original:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import shutil
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -205,6 +207,114 @@ class BoardState:
         except Exception:  # noqa: BLE001
             pass
         return {"commits": commits, "last_diff": last_diff}
+
+    # -- board revision diff (kb board-diff) ----------------------------------
+    # Same discipline as changes() above: every failure is swallowed and reported as
+    # empty/None, because a history tab must never take the dashboard down with it.
+
+    def _board_rel(self):
+        """(git root, board path relative to it), or (None, None)."""
+        from .layout import board_diff as bdmod
+        if not self.cfg.pcb or not self.cfg.pcb.exists():
+            return None, None
+        root = bdmod.git_root(self.cfg.pcb.parent)
+        if not root:
+            return None, None
+        try:
+            return root, self.cfg.pcb.resolve().relative_to(root.resolve()).as_posix()
+        except ValueError:
+            return None, None
+
+    def board_revisions(self, n: int = 20) -> list[dict]:
+        """Recent commits that actually touched this board file."""
+        from .layout import board_diff as bdmod
+        root, rel = self._board_rel()
+        if not root:
+            return []
+        try:
+            return bdmod.revisions(root, rel, n)
+        except Exception:  # noqa: BLE001
+            return []
+
+    def board_diff(self, old_rev: str, new_rev: str | None = None) -> dict:
+        """Structural delta between two revisions of the board.
+
+        `new_rev=None` compares against the working tree, so a designer sees their
+        uncommitted edits. Returns `{"error": ...}` rather than raising.
+        """
+        from .layout import board_diff as bdmod
+        root, rel = self._board_rel()
+        if not root:
+            return {"error": "board is not inside a git repository"}
+        try:
+            old_bytes = bdmod.blob_at(root, old_rev, rel)
+            if old_bytes is None:
+                return {"error": f"no board at revision {old_rev!r}"}
+            if new_rev:
+                new_bytes = bdmod.blob_at(root, new_rev, rel)
+                if new_bytes is None:
+                    return {"error": f"no board at revision {new_rev!r}"}
+            else:
+                new_bytes = self.cfg.pcb.read_bytes()
+            delta = bdmod.diff_boards(bdmod._parse_bytes(old_bytes),
+                                      bdmod._parse_bytes(new_bytes))
+            res = bdmod.summarize(delta, old_rev, new_rev or "working tree",
+                                  file_changed=old_bytes != new_bytes)
+            return {"old": old_rev, "new": new_rev or "working tree",
+                    "summary": res.summary, "delta": delta,
+                    "findings": [{"severity": f.severity, "message": f.message,
+                                  "where": f.where, "detail": f.detail}
+                                 for f in res.findings]}
+        except Exception as e:  # noqa: BLE001
+            return {"error": str(e)}
+
+    def board_diff_svg(self, old_rev: str, new_rev: str | None = None,
+                       side: str = "top") -> bytes | None:
+        """Colour-tinted overlay of two revisions, cached by the pair of blob hashes.
+
+        SVG rather than PNG because a flatpak kicad-cli cannot export PDF headlessly
+        (see core/imgdiff) — this is the render path that works everywhere.
+        """
+        from .layout import board_diff as bdmod
+        from .core import cli, imgdiff
+        root, rel = self._board_rel()
+        if not root:
+            return None
+        try:
+            old_bytes = bdmod.blob_at(root, old_rev, rel)
+            new_bytes = (bdmod.blob_at(root, new_rev, rel) if new_rev
+                         else self.cfg.pcb.read_bytes())
+            if old_bytes is None or new_bytes is None:
+                return None
+            key = f"{hashlib.sha256(old_bytes).hexdigest()[:16]}-" \
+                  f"{hashlib.sha256(new_bytes).hexdigest()[:16]}-{side}.svg"
+            cache = self.cfg.root / ".diff-cache"
+            hit = cache / key
+            if hit.exists():
+                return hit.read_bytes()
+
+            def render(data: bytes) -> bytes:
+                # /tmp on purpose: the flatpak kicad-cli can only read there.
+                with tempfile.NamedTemporaryFile(suffix=".kicad_pcb",
+                                                 delete=False) as fh:
+                    fh.write(data)
+                    tmp = Path(fh.name)
+                try:
+                    return cli.export_pcb_svg(tmp, side=side)
+                finally:
+                    tmp.unlink(missing_ok=True)
+
+            svg = imgdiff.overlay_svg(render(old_bytes), render(new_bytes))
+            cache.mkdir(parents=True, exist_ok=True)
+            gi = cache / ".gitignore"
+            if not gi.exists():
+                gi.write_text("*\n")        # regenerable; never committed
+            tmp_out = cache / f".tmp-{key}"
+            tmp_out.write_bytes(svg)
+            tmp_out.replace(hit)            # atomic, like the datasheet page cache
+            return svg
+        except Exception:  # noqa: BLE001
+            return None
 
     # -- datasheet review (kb review) — clone of the audit peek/state/bg trio --
 
