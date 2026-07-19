@@ -58,11 +58,8 @@ def blob_at(root: Path, rev: str, relpath: str) -> bytes | None:
     return p.stdout if p.returncode == 0 else None
 
 
-def board_at(root: Path, rev: str, relpath: str) -> pcbgeom.Board | None:
-    """Parse the board as it stood at `rev`. Stages under /tmp (flatpak grant)."""
-    data = blob_at(root, rev, relpath)
-    if data is None:
-        return None
+def _parse_bytes(data: bytes) -> pcbgeom.Board:
+    """Parse board bytes via a temp file under /tmp (the flatpak-readable staging area)."""
     with tempfile.NamedTemporaryFile(suffix=".kicad_pcb", delete=False) as fh:
         fh.write(data)
         tmp = Path(fh.name)
@@ -70,6 +67,12 @@ def board_at(root: Path, rev: str, relpath: str) -> pcbgeom.Board | None:
         return pcbgeom.parse(tmp)
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def board_at(root: Path, rev: str, relpath: str) -> pcbgeom.Board | None:
+    """Parse the board as it stood at `rev`. Stages under /tmp (flatpak grant)."""
+    data = blob_at(root, rev, relpath)
+    return _parse_bytes(data) if data is not None else None
 
 
 def revisions(root: Path, relpath: str, n: int = 20) -> list[dict]:
@@ -127,15 +130,73 @@ def diff_boards(old: pcbgeom.Board, new: pcbgeom.Board, tol_mm: float = 0.01) ->
     }
 
 
-def summarize(delta: dict, old_rev: str, new_rev: str) -> Result:
-    """Render a structural delta as a Result. Every line is informational."""
+def render_overlay(old_bytes: bytes, new_bytes: bytes, out_path: Path,
+                   side: str = "top", dpi: int = 150) -> dict:
+    """Render both revisions and write a colour-coded pixel overlay to `out_path`.
+
+    Staging goes through /tmp because kicad-cli is a flatpak granted `--filesystem=/tmp`
+    only — a board written anywhere else is invisible to it.
+    """
+    from ..core import cli, imgdiff
+
+    raster = out_path.suffix.lower() != ".svg"
+    if raster:
+        imgdiff._require()      # actionable error before we spend ~4s rendering
+
+    def _render(data: bytes) -> bytes:
+        with tempfile.NamedTemporaryFile(suffix=".kicad_pcb", delete=False) as fh:
+            fh.write(data)
+            tmp = Path(fh.name)
+        try:
+            if raster:
+                return imgdiff.pdf_to_png(cli.export_pcb_pdf(tmp, side=side), dpi=dpi)
+            return cli.export_pcb_svg(tmp, side=side)
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    try:
+        a, b = _render(old_bytes), _render(new_bytes)
+    except cli.KicadCliError as e:
+        if raster and "portal" in str(e):
+            raise RuntimeError(
+                "kicad-cli cannot export PDF here — a flatpak KiCad needs the xdg "
+                "document portal for its PDF plotter, which headless containers lack. "
+                "SVG export still works: pass an --image path ending in .svg for the "
+                "stdlib overlay instead.") from e
+        raise RuntimeError(str(e)) from e
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if raster:
+        png, stats = imgdiff.overlay(a, b)
+        out_path.write_bytes(png)
+        return {"path": str(out_path), **stats}
+    out_path.write_bytes(imgdiff.overlay_svg(a, b))
+    return {"path": str(out_path), "changed_pct": None, "format": "svg"}
+
+
+def summarize(delta: dict, old_rev: str, new_rev: str,
+              file_changed: bool | None = None) -> Result:
+    """Render a structural delta as a Result. Every line is informational.
+
+    `file_changed` lets the caller distinguish "the two revisions are the same board"
+    from "the file was rewritten but nothing this diff models actually moved" — a
+    re-pour or a uuid churn rewrites megabytes without changing a single component,
+    net or track, and reporting that as a flat "no change" would read as a bug.
+    """
     res = Result(f"Board diff {old_rev} → {new_rev}")
     counts = {k: len(delta[k]) for k in
               ("added_refs", "removed_refs", "changed_footprints", "moved",
                "added_nets", "removed_nets", "changed_nets")}
     if not any(counts.values()) and not delta["track_delta"] and not delta["via_delta"]:
-        res.ok("no change to components, nets or copper")
-        res.summary = "no change"
+        if file_changed:
+            res.ok("no structural change — the board file differs, but no component, "
+                   "net or track did",
+                   detail="zone fill, uuids or metadata only; this diff models "
+                          "components, placements, nets and copper counts")
+            res.summary = "no structural change (file differs)"
+        else:
+            res.ok("no change to components, nets or copper")
+            res.summary = "no change"
         return res
 
     if delta["added_refs"]:
@@ -186,20 +247,36 @@ def run(args) -> int:
     except ValueError:
         sys.exit(f"error: board is outside the git repo: {cfg.pcb}")
 
-    old = board_at(root, args.old_rev, rel)
-    if old is None:
+    old_bytes = blob_at(root, args.old_rev, rel)
+    if old_bytes is None:
         sys.exit(f"error: no board at revision {args.old_rev!r} (path {rel!r})")
+    old = _parse_bytes(old_bytes)
     if args.new_rev:
-        new = board_at(root, args.new_rev, rel)
-        if new is None:
+        new_bytes = blob_at(root, args.new_rev, rel)
+        if new_bytes is None:
             sys.exit(f"error: no board at revision {args.new_rev!r}")
         new_label = args.new_rev
     else:
-        new = pcbgeom.parse(cfg.pcb)            # the working tree, uncommitted edits and all
+        new_bytes = cfg.pcb.read_bytes()        # the working tree, uncommitted edits and all
         new_label = "working tree"
+    new = _parse_bytes(new_bytes)
 
-    res = summarize(diff_boards(old, new), args.old_rev, new_label)
+    res = summarize(diff_boards(old, new), args.old_rev, new_label,
+                    file_changed=old_bytes != new_bytes)
     print(res.render())
+
+    if getattr(args, "image", None):
+        try:
+            out = render_overlay(old_bytes, new_bytes, Path(args.image),
+                                 side=args.side, dpi=args.dpi)
+        except (RuntimeError, OSError) as e:
+            print(f"\nimage diff skipped: {e}")
+        else:
+            pct = out.get("changed_pct")
+            scale = f"{pct}% of pixels changed; " if isinstance(pct, (int, float)) \
+                else "vector overlay; "
+            print(f"\nimage diff -> {out['path']}  ({scale}"
+                  f"red = only in {args.old_rev}, blue = only in {new_label})")
     if args.strict and res.summary != "no change":
         return 1
     return 0
@@ -213,6 +290,11 @@ def add_parser(sub):
                    help="revision to compare against (default: the working tree)")
     p.add_argument("--strict", action="store_true",
                    help="exit 1 if anything changed (for CI freeze checks)")
+    p.add_argument("--image", metavar="PNG",
+                   help="also write a colour-coded overlay; .svg = stdlib vector overlay, .png = pixel diff ([imgdiff] extra)")
+    p.add_argument("--side", default="top", choices=("top", "bottom"),
+                   help="board side to render for --image (default: top)")
+    p.add_argument("--dpi", type=int, default=150, help="--image render DPI")
     p.add_argument("--board", help="which board (multi-board configs; default: first)")
     p.add_argument("--config", help=f"path to {cfgmod.CONFIG_NAME}")
     p.set_defaults(func=run)

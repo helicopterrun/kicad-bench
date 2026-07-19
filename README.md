@@ -17,7 +17,7 @@ next board. One CLI (`kb`), five tiers:
 | **Priority 1 — quality gates** | `erc-triage`, `netlist-audit`, `block-review`, `approved-parts`, `eco-drift`, `commit-gate`, `ksir-sync`, `symbol-style`, `sch-readability` | read-only schematic/library gates |
 | **Datasheet-grounded checks** | `cap-derating`, `led-current`, `pin-mux`, `constraints`, `review` | the semantic layer above ERC — deterministic checks + an LLM reviewer, both grounded in the manufacturer datasheets |
 | **Priority 2 — layout / DFM prep** | `netclass-coverage`, `netclass-sync`, `dfm-preflight`, `stackup-sync`, `release-prep`, `dru-lint` | pre-layout and pre-fab gates |
-| **Priority 3 — routed geometry** | `diffpair-audit`, `track-conformance`, `route-coverage`, `dru-guard` | as-routed copper audits DRC can't do |
+| **Priority 3 — routed geometry** | `diffpair-audit`, `track-conformance`, `route-coverage`, `dru-guard`, `board-diff` | as-routed copper audits DRC can't do |
 
 Plus the working surfaces: **`kb audit`** (everything at once), **`kb datasheet`**
 (harvest/ingest/read PDFs cheaply), **`kb lib-search`**, **`kb sch-live`**, **`kb
@@ -180,6 +180,37 @@ near-miss detection (difflib ≥ 0.85), designator-range enforcement (from
 `[approved_parts]`: missing MPN and unapproved MPN can each be error or warn. This is
 the `kb` side of the contract that [`kicad-parts`](../kicad-parts)' catalog kanban
 syncs into (`kp` promotes catalog rows → `approved_parts.csv`).
+
+### `kb board-diff <old-rev> [<new-rev>]`
+
+**Problem.** `kb changes` lists commits; nothing said what they did to the *board*.
+Reading a `.kicad_pcb` diff by eye is hopeless — nudging one footprint rewrites
+coordinates all over the file, and a re-pour rewrites megabytes of zone polygon.
+
+**What it does.** Answers the review question instead: which components appeared,
+vanished, changed footprint, moved or flipped (with offsets); which nets appeared,
+vanished or changed membership; how the copper totals moved. Pure set/dict math over
+the parsers that already exist. When the file differs but nothing structural does, it
+says exactly that rather than a flat "no change".
+
+**Never `git checkout`.** History is read with `git show <rev>:<path>`, which writes
+nothing — a checkout would clobber uncommitted work in the tree being reviewed. There
+is a regression test asserting the working tree is byte-identical afterwards.
+
+**`--image`.** Writes a colour-coded overlay of the two revisions (old red, new blue).
+Both renders come from `--page-size-mode 2 --exclude-drawing-sheet`, so two revisions
+of the same outline are pixel-aligned for free.
+* `--image out.svg` composes the two SVG exports — stdlib only, works anywhere
+  `kicad-cli pcb export svg` does.
+* `--image out.png` does a true pixel diff and reports what fraction of the board
+  changed. Needs the `[imgdiff]` extra (Pillow) plus `pdftoppm`, and goes board → PDF →
+  PNG because kicad-cli has no 2D PNG export.
+
+**KiCad footgun it encodes.** A *flatpak* kicad-cli cannot export PDF or PS headlessly —
+its plotter needs the xdg document portal (`Can't get document portal … Can't mount
+path /run/user/0/doc`), which a container doesn't have. SVG export is unaffected. So
+the `.png` path is for native KiCad installs and the `.svg` overlay is the one that
+always runs; the error message says so rather than failing opaquely.
 
 ### Physics-grounded impedance (`core/ipc.py`, wired into `kb diffpair-audit`)
 

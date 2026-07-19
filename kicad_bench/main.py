@@ -16,7 +16,7 @@ from .core import cli
 from .quality import (approved_parts, block_review, cap_derating, commit_gate,
                       eco_drift, erc_triage, ksir_sync, led_current, netlist_audit,
                       pin_mux, symbol_style, sch_readability)
-from .layout import (dfm_preflight, diffpair_audit, dru_guard, dru_lint,
+from .layout import (board_diff, dfm_preflight, diffpair_audit, dru_guard, dru_lint,
                      netclass_coverage, netclass_sync, release_prep,
                      route_coverage, stackup_sync, track_conformance)
 
@@ -35,6 +35,7 @@ _TOOLS = [
     netclass_coverage, netclass_sync, dfm_preflight, stackup_sync,  # Priority 2
     release_prep, dru_lint,
     diffpair_audit, track_conformance, route_coverage, dru_guard,   # Priority 3: routed-geometry audits
+    board_diff,                                                  # what changed on the PCB between revisions
 ]
 
 

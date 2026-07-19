@@ -184,6 +184,41 @@ def export_pcb_svg(pcb: str | Path, side: str = "top") -> bytes:
     return data
 
 
+def export_pcb_pdf(pcb: str | Path, side: str = "top") -> bytes:
+    """Same cropped, drawing-sheet-free view as `export_pcb_svg`, but as a PDF.
+
+    Exists because kicad-cli has no 2D PNG export for a board and nothing here can
+    rasterize SVG — but the datasheet subsystem already shells to `pdftoppm`. So the
+    revision-diff renderer goes board -> PDF -> PNG, reusing a converter we depend on
+    anyway. Same crop and layer set as the SVG path, so the two views line up.
+    """
+    _require()
+    if side == "bottom":
+        layers, mirror = "B.Cu,B.Silkscreen,Edge.Cuts", True
+    else:
+        layers, mirror = "F.Cu,F.Silkscreen,Edge.Cuts", False
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+        out = f.name
+    cmd = ["kicad-cli", "pcb", "export", "pdf",
+           "--mode-single",
+           "--layers", layers,
+           "--page-size-mode", "2",
+           "--exclude-drawing-sheet"]
+    if mirror:
+        cmd.append("--mirror")
+    cmd += ["--output", out, str(pcb)]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        data = Path(out).read_bytes()
+    except OSError:
+        raise KicadCliError(f"PCB PDF export failed:\n{r.stderr.strip()}")
+    finally:
+        Path(out).unlink(missing_ok=True)
+    if not data:
+        raise KicadCliError(f"PCB PDF export produced no output:\n{r.stderr.strip()}")
+    return data
+
+
 def export_pcb_layer_svg(pcb: str | Path, layer: str, color: str | None = None) -> bytes:
     """Export ONE board layer as a cropped, drawing-sheet-free SVG and return its bytes,
     optionally recolored to a single hex color. Every layer is plotted to the same
