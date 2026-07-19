@@ -21,7 +21,8 @@ Schema (``"schema": 1``):
       "abs_max":     [{"param": "...", "value": "...", "unit": "", "pins": "", "page": 6}],
       "recommended": [ same shape ],
       "spec": {"v_rating": 16.0, "dielectric": "X7R", "vf": 2.0, "if_max": 0.02,
-               "vin_max": 6.0, "vout": 3.3, "other": [{"param": ..., "value": ...}]},
+               "vin_max": 6.0, "vout": 3.3, "vref": 1.146,
+               "other": [{"param": ..., "value": ...}]},
       "source_pages": {"pins": [3,4], "abs_max": [6], "recommended": [7], "spec": []}
     }
 

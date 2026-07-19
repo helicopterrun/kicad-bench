@@ -193,6 +193,18 @@ def build_from(counts: dict[str, list[str]],
 # is set by the external divider, not by any single datasheet number.
 _OUT_PIN_NAMES = {"VOUT", "OUT", "VO"}
 
+# Feedback-sense pins whose divider sets a POSITIVE rail: Vout = Vref·(1 + Rtop/Rbot).
+_FB_PIN_NAMES = {"FB", "VFB", "ADJ", "VADJ", "FBP"}
+# Inverting sense pins use a different formula (V = -Vref·Rtop/Rbot) referenced to a
+# separate REF pin, and charge-pump loops often sense an intermediate node rather than
+# the rail they name. Getting either subtly wrong on a ± rail is exactly the false
+# number the review layer's downgrade-only discipline exists to prevent — so they are
+# recognised only in order to be skipped.
+_INVERTING_PIN_NAMES = {"FBN", "VFBN"}
+
+_RESISTOR = re.compile(r"^R\d+$")
+_VOUT_SANE = (0.5, 60.0)          # outside this, treat the solve as nonsense and skip
+
 
 def solve_rail_voltages(g: DesignGraph,
                         lookup=None) -> int:
@@ -247,6 +259,105 @@ def solve_rail_voltages(g: DesignGraph,
         if net.kind == "signal":
             net.kind = "power"          # a regulated output is a rail, whatever it's called
         resolved += 1
+
+    resolved += _solve_dividers(g, lookup)
+    return resolved
+
+
+def _set(net: "Net", volts: float, source: str) -> bool:
+    """Fill in an unknown rail voltage. Never overwrites; returns whether it wrote."""
+    if net is None or net.voltage is not None:
+        return False
+    if not _VOUT_SANE[0] <= abs(volts) <= _VOUT_SANE[1]:
+        return False
+    net.voltage = volts
+    net.voltage_source = source
+    if net.kind == "signal":
+        net.kind = "power"
+    return True
+
+
+def _other_net(comp: "Component", net_name: str) -> str | None:
+    """The net on a two-terminal part's far side, or None if it isn't a clean pair."""
+    others = {n for n in comp.pins.values() if n != net_name}
+    return others.pop() if len(others) == 1 else None
+
+
+def _solve_dividers(g: DesignGraph, lookup) -> int:
+    """Resolve rails set by a regulator's feedback divider.
+
+    Walks each regulator's FB pin to exactly two resistors, identifies which one goes to
+    ground, and applies `Vout = Vref·(1 + Rtop/Rbot)`. Anything ambiguous — a Vref we
+    can't source, a count other than two resistors, a bottom leg that doesn't land on
+    ground, an unparsable value, an inverting topology — leaves the rail unknown.
+    """
+    from . import conspec, partspec, vref as vrefmod
+
+    resolved = 0
+    for ref in sorted(g.components):
+        comp = g.components[ref]
+        key = conspec.part_key(comp)
+        cons = lookup(key) if key else None
+        if not cons:
+            continue
+        pins = cons.get("pins") or []
+        spec = cons.get("spec") or {}
+
+        # The part's reference voltage: extracted datasheet value first (page-cited and
+        # part-specific), then the family table.
+        vref_v = spec.get("vref")
+        table_v, table_src = vrefmod.lookup(comp.mpn, comp.value)
+        if vref_v is None and table_src == "family":
+            vref_v = table_v
+
+        for p in pins:
+            name = (p.get("name") or "").strip().upper()
+            if name in _INVERTING_PIN_NAMES:
+                continue                      # recognised, deliberately not solved
+            if name not in _FB_PIN_NAMES:
+                continue
+            fb_net_name = comp.pins.get(str(p.get("number")))
+            fb_net = g.nets.get(fb_net_name) if fb_net_name else None
+            if fb_net is None:
+                continue
+
+            resistors = [g.components[r] for r, _ in fb_net.pins
+                         if r != ref and _RESISTOR.match(r) and r in g.components]
+            resistors = list({r.ref: r for r in resistors}.values())
+
+            if not resistors:
+                # FB tied straight to the output rail — a fixed-output part. Its voltage
+                # is the datasheet's, or the one encoded in its own MPN suffix.
+                fixed = spec.get("vout")
+                if fixed is None and table_src == "fixed_suffix":
+                    fixed = table_v
+                if fixed is not None and _set(fb_net, float(fixed), "vout"):
+                    resolved += 1
+                continue
+
+            if len(resistors) != 2 or vref_v is None:
+                continue
+
+            legs = []
+            for r in resistors:
+                far_name = _other_net(r, fb_net_name)
+                ohms = partspec.parse_value(r.value, hint="R").get("ohms")
+                legs.append((r, far_name, g.nets.get(far_name) if far_name else None, ohms))
+            if any(ohms is None or far is None for _, far, _, ohms in legs):
+                continue
+
+            bottoms = [l for l in legs if l[2] is not None and l[2].voltage == 0.0]
+            tops = [l for l in legs if l not in bottoms]
+            if len(bottoms) != 1 or len(tops) != 1:
+                # Not a plain rail-to-ground divider: an inverting leg, a bias network,
+                # or a second sense point. Skip rather than invent a topology.
+                continue
+            rbot, rtop = bottoms[0][3], tops[0][3]
+            out_net = tops[0][2]
+            if not rbot or out_net is None:
+                continue
+            if _set(out_net, float(vref_v) * (1.0 + rtop / rbot), "divider"):
+                resolved += 1
     return resolved
 
 
