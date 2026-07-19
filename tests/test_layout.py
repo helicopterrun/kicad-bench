@@ -201,3 +201,131 @@ def test_block_of():
 def test_net_in_description_regex():
     m = route_coverage._NET_IN_DESC.search("Pad 1 [/VIN_3V3] of U2 on F.Cu")
     assert m.group(1) == "/VIN_3V3"
+
+
+# ---------------------------------------------------------------------------
+# stackup parsing (the impedance geometry source)
+# ---------------------------------------------------------------------------
+
+STACKUP_BOARD = """\
+(kicad_pcb (version 20260306) (generator "pcbnew")
+  (setup
+    (stackup
+      (layer "F.Mask" (type "Top Solder Mask") (thickness 0.01) (epsilon_r 3.3))
+      (layer "F.Cu" (type "copper") (thickness 0.035))
+      (layer "dielectric 1" (type "prepreg") (thickness 0.0918) (epsilon_r 4.6))
+      (layer "In1.Cu" (type "copper") (thickness 0.0152))
+      (layer "dielectric 2" (type "core") (thickness 1.265) (epsilon_r 4.7))
+      (layer "In2.Cu" (type "copper") (thickness 0.0152))
+      (layer "dielectric 3" (type "prepreg") (thickness 0.0918) (epsilon_r 4.6))
+      (layer "B.Cu" (type "copper") (thickness 0.035))
+    )
+  )
+  (net 0 "")
+)
+"""
+
+
+def test_stackup_parsed(tmp_path):
+    b = parse(tmp_path, STACKUP_BOARD)
+    assert b.stackup is not None
+    assert b.stackup.copper_layers() == ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
+
+
+def test_stackup_microstrip_geometry(tmp_path):
+    """F.Cu references the nearest copper below it, across the prepreg only."""
+    b = parse(tmp_path, STACKUP_BOARD)
+    assert b.stackup.microstrip_geometry("F.Cu") == (0.0918, 4.6, 0.035)
+
+
+def test_stackup_bottom_layer_walks_the_other_way(tmp_path):
+    """B.Cu has no dielectric below it — the reference plane is inboard, above."""
+    b = parse(tmp_path, STACKUP_BOARD)
+    assert b.stackup.microstrip_geometry("B.Cu") == (0.0918, 4.6, 0.035)
+
+
+def test_stackup_weighted_er_across_a_sandwich(tmp_path):
+    """In1.Cu sits over the thick core alone, so its epsilon_r is that layer's."""
+    b = parse(tmp_path, STACKUP_BOARD)
+    h, er, t = b.stackup.microstrip_geometry("In1.Cu")
+    assert (h, er, t) == (1.265, 4.7, 0.0152)
+
+
+def test_stackup_unknown_layer_is_none(tmp_path):
+    b = parse(tmp_path, STACKUP_BOARD)
+    assert b.stackup.microstrip_geometry("In7.Cu") is None
+
+
+def test_board_without_stackup_is_none(tmp_path):
+    assert parse(tmp_path).stackup is None
+
+
+def test_stackup_missing_epsilon_r_skips_rather_than_guessing(tmp_path):
+    text = STACKUP_BOARD.replace(
+        '(layer "dielectric 1" (type "prepreg") (thickness 0.0918) (epsilon_r 4.6))',
+        '(layer "dielectric 1" (type "prepreg") (thickness 0.0918))')
+    b = parse(tmp_path, text)
+    assert b.stackup is not None
+    assert b.stackup.microstrip_geometry("F.Cu") is None
+
+
+def test_diffpair_impedance_skips_without_a_stackup(tmp_path):
+    """No stackup -> one aggregated info line, never a guessed FR4 warning."""
+    res = diffpair_audit.analyze(parse(tmp_path, DP_BOARD), DP_FAB,
+                                 max_skew=0.15, width_tol=0.02, max_bus_spread=5.0)
+    msgs = " ".join(f.message for f in res.findings)
+    assert "without a computed impedance" in msgs
+    assert "computed" not in " ".join(
+        f.message for f in res.findings if f.severity == "warn")
+
+
+DP_STACK_FAB = {"diff_pairs": {"LVDS": {"target_impedance_ohm": 100,
+                                        "track_width": 0.1128, "gap": 0.2032,
+                                        "members": ["CLK"]}}}
+
+
+def _stacked_dp_board(tmp_path):
+    """DP_BOARD's copper plus a real stackup, so impedance can be computed."""
+    text = DP_BOARD.replace('(kicad_pcb (version 20260306) (generator "pcbnew")',
+                            '(kicad_pcb (version 20260306) (generator "pcbnew")\n'
+                            + STACKUP_BOARD.split("(setup", 1)[1]
+                              .rsplit("(net 0", 1)[0].join(("  (setup", "")), 1)
+    return parse(tmp_path, text)
+
+
+def test_diffpair_computes_impedance_from_the_board_stackup(tmp_path):
+    res = diffpair_audit.analyze(_stacked_dp_board(tmp_path), DP_STACK_FAB,
+                                 max_skew=0.15, width_tol=0.02, max_bus_spread=5.0)
+    msgs = " ".join(f.message for f in res.findings)
+    assert "computed 98.9" in msgs
+    # 98.9 vs a 100 ohm target is inside the default 10% band -> no warning.
+    assert not any("outside" in f.message for f in res.findings)
+
+
+def test_diffpair_warns_when_impedance_misses_target(tmp_path):
+    fab = {"diff_pairs": {"LVDS": {**DP_STACK_FAB["diff_pairs"]["LVDS"],
+                                   "target_impedance_ohm": 50}}}
+    res = diffpair_audit.analyze(_stacked_dp_board(tmp_path), fab,
+                                 max_skew=0.15, width_tol=0.02, max_bus_spread=5.0)
+    assert any(f.severity == "warn" and "outside" in f.message for f in res.findings)
+    assert res.n_errors == 0          # physics is warn-biased, never an error
+
+
+def test_diffpair_skips_when_the_pour_is_closer_than_the_plane(tmp_path):
+    """Coplanar-dominated geometry: the microstrip model doesn't describe it."""
+    fab = {"diff_pairs": {"LVDS": {**DP_STACK_FAB["diff_pairs"]["LVDS"],
+                                   "coplanar_clearance": 0.05}}}   # < h of 0.0918
+    res = diffpair_audit.analyze(_stacked_dp_board(tmp_path), fab,
+                                 max_skew=0.15, width_tol=0.02, max_bus_spread=5.0)
+    msgs = " ".join(f.message for f in res.findings)
+    assert "computed 98.9" not in msgs
+    assert "without a computed impedance" in msgs
+
+
+def test_diffpair_still_computes_when_the_plane_is_closer(tmp_path):
+    """Pour farther than the plane -> the plane dominates and the model holds."""
+    fab = {"diff_pairs": {"LVDS": {**DP_STACK_FAB["diff_pairs"]["LVDS"],
+                                   "coplanar_clearance": 0.2032}}}  # > h of 0.0918
+    res = diffpair_audit.analyze(_stacked_dp_board(tmp_path), fab,
+                                 max_skew=0.15, width_tol=0.02, max_bus_spread=5.0)
+    assert "computed 98.9" in " ".join(f.message for f in res.findings)

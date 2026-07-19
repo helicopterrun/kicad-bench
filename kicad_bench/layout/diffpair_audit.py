@@ -18,7 +18,7 @@ import json
 import sys
 from pathlib import Path
 
-from ..core import config as cfgmod, pcbgeom
+from ..core import config as cfgmod, ipc, pcbgeom
 from ..core.report import Result
 
 # A pair member base (e.g. "TMDS_CLK") maps to these candidate P/N leaf names.
@@ -39,8 +39,43 @@ def _outer_copper_single(layers: set[str]) -> bool:
     return layers in ({"F.Cu"}, {"B.Cu"})
 
 
+def _impedance_check(board: pcbgeom.Board, spec: dict, layer: str = "F.Cu"):
+    """(computed Zdiff | None, one-line note) for a diff-pair group.
+
+    Needs the board's own stackup plus the group's designed width and gap. Any missing
+    term returns None — this is warn-biased physics, it never guesses a default FR4.
+    """
+    w = spec.get("track_width")
+    s = spec.get("gap")
+    if not board.stackup or not w or not s:
+        return None, ""
+    geom = board.stackup.microstrip_geometry(layer)
+    if not geom:
+        return None, ""
+    h, er, t = geom
+    if not 0.1 <= w / h <= 3.0:
+        # Outside the curve fit's stated validity band — the number would be a guess.
+        return None, ""
+    coplanar = spec.get("coplanar_clearance")
+    if coplanar and coplanar < h:
+        # Routed as coplanar waveguide with a ground pour alongside, and that pour is
+        # CLOSER than the reference plane — so the pour, not the plane, sets the
+        # impedance and this microstrip model does not describe the geometry. (When the
+        # pour is farther than the plane, as on a thin-prepreg inner-ground stackup, the
+        # plane still dominates and the model holds: that case is left to compute.)
+        # Measured: a 2-layer board with h = 1.51 mm and a 0.2 mm pour clearance reads
+        # 144 Ω against a 90 Ω target under this model — a model mismatch, not drift.
+        return None, ""
+    try:
+        z0 = ipc.microstrip_z0(w, h, t, er)
+        zdiff = ipc.differential_z(z0, s, h)
+    except ValueError:
+        return None, ""
+    return zdiff, f"  [computed {zdiff:.1f} Ω on {h:.4f} mm εr {er:.2f}]"
+
+
 def analyze(board: pcbgeom.Board, fab: dict, max_skew: float, width_tol: float,
-            max_bus_spread: float) -> Result:
+            max_bus_spread: float, impedance_tol: float = 0.10) -> Result:
     res = Result("Diff-pair geometry audit")
     groups = fab.get("diff_pairs", {})
     if not groups:
@@ -48,11 +83,23 @@ def analyze(board: pcbgeom.Board, fab: dict, max_skew: float, width_tol: float,
         return res
 
     n_real = 0
+    no_geometry = 0
     for gname, spec in groups.items():
         target_w = spec.get("track_width")
         z = spec.get("target_impedance_ohm", "?")
         members = spec.get("members", [])
-        res.info(f"{gname}  ({z} Ω, target {target_w} mm)  — {len(members)} pair(s)")
+
+        computed, note = _impedance_check(board, spec)
+        if computed is None:
+            no_geometry += 1
+        res.info(f"{gname}  ({z} Ω, target {target_w} mm){note}  — {len(members)} pair(s)")
+        if computed is not None and isinstance(z, (int, float)) and z > 0:
+            dev = (computed - z) / z
+            if abs(dev) > impedance_tol:
+                res.warn(f"  {gname}: computed {computed:.1f} Ω vs {z} Ω target "
+                         f"({dev:+.1%}, outside ±{impedance_tol:.0%})", gname,
+                         "IPC-2141 closed form on the board's own stackup; "
+                         "a coplanar pour beside the pair lowers this a few percent")
 
         routed_lengths: list[tuple[str, float]] = []
         for base in members:
@@ -117,6 +164,11 @@ def analyze(board: pcbgeom.Board, fab: dict, max_skew: float, width_tol: float,
                               f"across {len(routed_lengths)} routed pair(s)",
                               detail=f"min {lo:.2f} / max {hi:.2f} mm "
                                      f"(inter-pair budget {max_bus_spread} mm)")
+
+    if no_geometry:
+        res.info(f"{no_geometry} group(s) without a computed impedance — needs the "
+                 "board's stackup plus track_width/gap, and a geometry the microstrip "
+                 "model covers (not coplanar-dominated, w/h within 0.1–3.0)")
 
     res.summary = (f"{n_real} routed pair(s) flagged for review"
                    if n_real else "all routed pairs within budget")

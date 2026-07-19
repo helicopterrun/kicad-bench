@@ -181,6 +181,32 @@ near-miss detection (difflib ≥ 0.85), designator-range enforcement (from
 the `kb` side of the contract that [`kicad-parts`](../kicad-parts)' catalog kanban
 syncs into (`kp` promotes catalog rows → `approved_parts.csv`).
 
+### Physics-grounded impedance (`core/ipc.py`, wired into `kb diffpair-audit`)
+
+`track-conformance` checks copper against a *config floor* — a number someone typed.
+`core/ipc.py` checks against the published models instead: closed-form IPC-2141
+microstrip/stripline and differential impedance, plus IPC-2221 current capacity.
+
+The geometry comes from the **board's own** `(setup (stackup ...))`, now parsed into
+`pcbgeom.Board.stackup` — dielectric height and epsilon_r per layer. The board file is
+the authoritative source, so it can't drift the way a parallel fab-config copy would,
+and no new config keys are needed. `diffpair-audit` already read
+`target_impedance_ohm` and only printed it; it now computes the pair's actual
+differential impedance and warns outside ±10%.
+
+Everything here is **mm-native** (the reference implementations in the wild are
+mils-native; mixing the two is a permanent bug source) and **warn-biased** — the IPC
+closed forms are curve fits good to roughly ±10%, so a computed value is evidence for
+a warning, never for an error.
+
+It skips rather than guessing when the model doesn't describe the geometry: no stackup,
+`w/h` outside the fit's 0.1–3.0 validity band, or a coplanar ground pour *closer* than
+the reference plane (then the pour sets the impedance, not the plane). That last rule
+is load-bearing — on a 2-layer board with a 1.51 mm dielectric and a 0.2 mm pour
+clearance the plain microstrip model reads 144 Ω against a 90 Ω target, which is a
+model mismatch, not a design error. On a thin-prepreg inner-ground stackup where the
+plane is nearer, the model holds and is used.
+
 ### `kb eco-drift [sheet]`
 
 **Problem.** Nothing checked that the board still matches the *schematic*. A footprint
