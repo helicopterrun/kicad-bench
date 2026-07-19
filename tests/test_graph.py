@@ -27,6 +27,14 @@ def test_infer_net_role_table():
         "VBUS_5V0": ("power", 5.0),
         "VBAT": ("power", None),
         "VREF_2.5V": ("power", 2.5),
+        # trailing voltage token asserts a rail without a power prefix
+        "HDMI_5V": ("power", 5.0),
+        "TOUCH_VDD_2V8": ("power", 2.8),
+        "/video/HDMI_5V": ("power", 5.0),      # judged on the leaf
+        "PANEL_3.3V": ("power", 3.3),
+        # ...but only anchored at the end, after a '_'
+        "LVDS_D3V_P": ("signal", None),
+        "TMDS_5V_CLK": ("signal", None),
         # plain signals
         "SPI_MISO": ("signal", None),
         "UART5_TX": ("signal", None),
@@ -108,8 +116,12 @@ def test_queries():
 # solve_rail_voltages — topology-solved rails
 # ---------------------------------------------------------------------------
 
-def _reg_graph(out_pin_name="VOUT", out_net="TOUCH_VDD_3V3"):
-    """An LDO (U10) feeding `out_net`, plus a decoupling cap on that rail."""
+def _reg_graph(out_pin_name="VOUT", out_net="TOUCH_SUPPLY"):
+    """An LDO (U10) feeding `out_net`, plus a decoupling cap on that rail.
+
+    The default net name deliberately asserts NO voltage, so these tests isolate the
+    datasheet path from the name-inference path.
+    """
     counts = {
         "+5V": ["U10.1"],
         "GND": ["U10.2", "C9.2"],
@@ -133,13 +145,13 @@ def _reg_graph(out_pin_name="VOUT", out_net="TOUCH_VDD_3V3"):
 def test_solve_rail_voltages_from_regulator_output_pin():
     g, lookup = _reg_graph()
     # The name says nothing (leaf starts with TOUCH, not a power prefix).
-    assert g.nets["TOUCH_VDD_3V3"].voltage is None
-    assert g.nets["TOUCH_VDD_3V3"].kind == "signal"
+    assert g.nets["TOUCH_SUPPLY"].voltage is None
+    assert g.nets["TOUCH_SUPPLY"].kind == "signal"
 
     assert graph.solve_rail_voltages(g, lookup) == 1
-    assert g.nets["TOUCH_VDD_3V3"].voltage == 3.3
-    assert g.nets["TOUCH_VDD_3V3"].voltage_source == "vout"
-    assert g.nets["TOUCH_VDD_3V3"].kind == "power"   # a regulated output is a rail
+    assert g.nets["TOUCH_SUPPLY"].voltage == 3.3
+    assert g.nets["TOUCH_SUPPLY"].voltage_source == "vout"
+    assert g.nets["TOUCH_SUPPLY"].kind == "power"   # a regulated output is a rail
 
 
 def test_solve_rail_voltages_needs_an_output_named_pin():
@@ -147,8 +159,8 @@ def test_solve_rail_voltages_needs_an_output_named_pin():
     # senses through FB, so there is no output pin to propagate through. Skip.
     g, lookup = _reg_graph(out_pin_name="FB")
     assert graph.solve_rail_voltages(g, lookup) == 0
-    assert g.nets["TOUCH_VDD_3V3"].voltage is None
-    assert g.nets["TOUCH_VDD_3V3"].voltage_source is None
+    assert g.nets["TOUCH_SUPPLY"].voltage is None
+    assert g.nets["TOUCH_SUPPLY"].voltage_source is None
 
 
 def test_solve_rail_voltages_never_overwrites_a_named_rail():
@@ -165,7 +177,7 @@ def test_solve_rail_voltages_skips_ambiguous_multi_output():
     cons = lookup("AP2112K-3.3TRG1")
     cons["pins"].append({"number": "6", "name": "VOUT"})
     assert graph.solve_rail_voltages(g, lookup) == 0
-    assert g.nets["TOUCH_VDD_3V3"].voltage is None
+    assert g.nets["TOUCH_SUPPLY"].voltage is None
 
 
 def test_solve_rail_voltages_without_lookup_is_a_noop():

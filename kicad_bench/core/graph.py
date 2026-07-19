@@ -42,6 +42,8 @@ _POWER_PREFIXES = (
 # "3V3" / "1V35" digit-V-digit shorthand; "-5V" / "12V" / "3.3V" plain volts.
 _SHORTHAND_V = re.compile(r"(?<![\d.])(-?)(\d+)V(\d+)(?![\dV])")
 _PLAIN_V = re.compile(r"(?<![\d.])(-?)(\d+(?:\.\d+)?)\s*V(?![\dA-Za-z])")
+# "..._5V" / "..._2V8" / "..._3.3V" as a trailing rail assertion.
+_SUFFIX_V = re.compile(r"_(\d+V\d+|\d+(?:\.\d+)?V)$")
 
 
 def _parse_rail_voltage(name: str) -> float | None:
@@ -78,6 +80,15 @@ def infer_net_role(name: str) -> tuple[str, float | None]:
 
     if upper.startswith(_POWER_PREFIXES):
         return "power", _parse_rail_voltage(upper)
+
+    # A name *ending* in a voltage token asserts a rail even with no power prefix —
+    # "HDMI_5V", "TOUCH_VDD_2V8". The designer wrote the voltage down; read it.
+    # Anchored to the end and requiring the separating '_' so signal names that merely
+    # contain a digit-V run ("LVDS_D3V_P") can't match.
+    if _SUFFIX_V.search(upper):
+        v = _parse_rail_voltage(upper)
+        if v is not None:
+            return "power", v
 
     return "signal", None
 
