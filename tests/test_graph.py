@@ -102,3 +102,79 @@ def test_queries():
     n = g.neighbors("C1")
     assert ("U1", "5") in n["+3V3"] and ("U2", "6") in n["+3V3"]
     assert ("C1", "1") not in n["+3V3"]   # self excluded
+
+
+# ---------------------------------------------------------------------------
+# solve_rail_voltages — topology-solved rails
+# ---------------------------------------------------------------------------
+
+def _reg_graph(out_pin_name="VOUT", out_net="TOUCH_VDD_3V3"):
+    """An LDO (U10) feeding `out_net`, plus a decoupling cap on that rail."""
+    counts = {
+        "+5V": ["U10.1"],
+        "GND": ["U10.2", "C9.2"],
+        out_net: ["U10.5", "C9.1"],
+    }
+    pin_net = {}
+    for net, refpins in counts.items():
+        for rp in refpins:
+            ref, _, pin = rp.partition(".")
+            pin_net[(ref, pin)] = net
+    comps = [{"reference": "U10", "value": "AP2112K-3.3", "mpn": "AP2112K-3.3TRG1"},
+             {"reference": "C9", "value": "1uF 16V X7R", "mpn": ""}]
+    g = graph.build_from(counts, pin_net, comps)
+    cons = {"spec": {"vout": 3.3},
+            "pins": [{"number": "1", "name": "VIN"},
+                     {"number": "2", "name": "GND"},
+                     {"number": "5", "name": out_pin_name}]}
+    return g, {"AP2112K-3.3TRG1": cons}.get
+
+
+def test_solve_rail_voltages_from_regulator_output_pin():
+    g, lookup = _reg_graph()
+    # The name says nothing (leaf starts with TOUCH, not a power prefix).
+    assert g.nets["TOUCH_VDD_3V3"].voltage is None
+    assert g.nets["TOUCH_VDD_3V3"].kind == "signal"
+
+    assert graph.solve_rail_voltages(g, lookup) == 1
+    assert g.nets["TOUCH_VDD_3V3"].voltage == 3.3
+    assert g.nets["TOUCH_VDD_3V3"].voltage_source == "vout"
+    assert g.nets["TOUCH_VDD_3V3"].kind == "power"   # a regulated output is a rail
+
+
+def test_solve_rail_voltages_needs_an_output_named_pin():
+    # The TPS65150 shape: spec.vout is an abs-max headroom figure and the part
+    # senses through FB, so there is no output pin to propagate through. Skip.
+    g, lookup = _reg_graph(out_pin_name="FB")
+    assert graph.solve_rail_voltages(g, lookup) == 0
+    assert g.nets["TOUCH_VDD_3V3"].voltage is None
+    assert g.nets["TOUCH_VDD_3V3"].voltage_source is None
+
+
+def test_solve_rail_voltages_never_overwrites_a_named_rail():
+    g, lookup = _reg_graph(out_net="+1V8")     # name says 1.8 V, datasheet says 3.3
+    assert graph.solve_rail_voltages(g, lookup) == 0
+    assert g.nets["+1V8"].voltage == 1.8
+    assert g.nets["+1V8"].voltage_source == "netname"
+
+
+def test_solve_rail_voltages_skips_ambiguous_multi_output():
+    g, lookup = _reg_graph()
+    # A second VOUT-named pin landing on a different net: which rail is `vout`?
+    g.components["U10"].pins["6"] = "+5V"
+    cons = lookup("AP2112K-3.3TRG1")
+    cons["pins"].append({"number": "6", "name": "VOUT"})
+    assert graph.solve_rail_voltages(g, lookup) == 0
+    assert g.nets["TOUCH_VDD_3V3"].voltage is None
+
+
+def test_solve_rail_voltages_without_lookup_is_a_noop():
+    g, _ = _reg_graph()
+    assert graph.solve_rail_voltages(g, None) == 0
+
+
+def test_build_from_records_netname_provenance():
+    g = _graph()
+    assert g.nets["+3V3"].voltage_source == "netname"
+    assert g.nets["GND"].voltage_source == "netname"
+    assert g.nets["UART_TX"].voltage_source is None

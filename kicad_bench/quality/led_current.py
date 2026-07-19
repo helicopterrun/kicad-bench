@@ -150,7 +150,10 @@ def run(args) -> int:
     if not sch or not Path(sch).exists():
         sys.exit(f"error: schematic not found: {sch}")
     from ..core import conspec
-    return render_and_exit(check(graphmod.build(sch), lookup=conspec.lookup(cfg)))
+    lookup = conspec.lookup(cfg)
+    g = graphmod.build(sch)
+    graphmod.solve_rail_voltages(g, lookup)
+    return render_and_exit(check(g, lookup=lookup))
 
 
 def add_parser(sub):

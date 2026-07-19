@@ -6,10 +6,16 @@ datasheet-grounded checks (cap-derating, led-current, pin-mux) and the `kb revie
 engine query, instead of each re-deriving connectivity from raw exports.
 
 Net *roles* (ground / power / signal) and nominal rail voltages are inferred from net
-names only — `+3V3`, `VCC_1V8`, `GND` — the same convention the house templates use for
+names — `+3V3`, `VCC_1V8`, `GND` — the same convention the house templates use for
 power nets. Inference is deliberately conservative: a name that doesn't clearly assert
 a rail stays a `signal` with no voltage, and downstream checks must treat a missing
 voltage as "unknown", never as 0.
+
+`solve_rail_voltages()` is an optional second pass that resolves what the names leave
+unknown, from the circuit itself: a regulator's datasheet output voltage propagated
+through the pin the datasheet calls an output. It only ever fills in unknowns — a
+named rail is the designer's assertion and always wins — and every net records how
+its voltage was established in `voltage_source`.
 
 Read-only; plain stdlib dataclasses (kicad-bench core stays dependency-light).
 """
@@ -94,6 +100,12 @@ class Net:
     kind: str = "signal"                                  # "gnd" | "power" | "signal"
     voltage: float | None = None                          # nominal volts (gnd -> 0.0)
     pins: list[tuple[str, str]] = field(default_factory=list)  # [(ref, pin), ...]
+    # How `voltage` was established: "netname" (inferred from the net's own name),
+    # "vout" (a regulator's datasheet output voltage, propagated through its output
+    # pin) or None when the voltage is unknown. Consumers that report a voltage to a
+    # human should say which — a name-inferred rail is an assertion by the designer,
+    # a computed one is an assertion by the circuit.
+    voltage_source: str | None = None
 
 
 @dataclass
@@ -154,9 +166,77 @@ def build_from(counts: dict[str, list[str]],
         for rp in refpins:
             ref, _, pin = rp.partition(".")
             pins.append((ref, pin))
-        g.nets[net_name] = Net(name=net_name, kind=kind, voltage=voltage, pins=pins)
+        g.nets[net_name] = Net(name=net_name, kind=kind, voltage=voltage, pins=pins,
+                               voltage_source="netname" if voltage is not None else None)
 
     return g
+
+
+# ---------------------------------------------------------------------------
+# Topology-solved rail voltages
+# ---------------------------------------------------------------------------
+
+# Pin names that carry a regulator's *regulated output*. Deliberately short: a
+# datasheet output voltage may only be propagated through a pin the datasheet itself
+# calls an output. Sense pins (FB/ADJ) are excluded — on an adjustable part the rail
+# is set by the external divider, not by any single datasheet number.
+_OUT_PIN_NAMES = {"VOUT", "OUT", "VO"}
+
+
+def solve_rail_voltages(g: DesignGraph,
+                        lookup=None) -> int:
+    """Resolve rail voltages that net names don't assert, from regulator topology.
+
+    A post-pass over an already-built graph rather than a parameter on `build_from`:
+    it keeps the builder pure (no config, no datasheet index) and leaves every
+    existing call site working. Callers that hold a constraints lookup — the
+    datasheet-grounded gates already do — call this right after building.
+
+    Only nets whose voltage is still unknown are ever written, so an explicit rail
+    name always wins over a datasheet number. `lookup` is `conspec.lookup(cfg)`;
+    without one there is nothing to solve and this is a no-op.
+
+    Returns the number of nets newly resolved.
+    """
+    if lookup is None:
+        return 0
+    from . import conspec
+
+    resolved = 0
+    for ref in sorted(g.components):
+        comp = g.components[ref]
+        key = conspec.part_key(comp)
+        if not key:
+            continue
+        cons = lookup(key)
+        if not cons:
+            continue
+        vout = (cons.get("spec") or {}).get("vout")
+        if vout is None:
+            continue
+
+        # Every net reachable through a pin the datasheet names as an output.
+        out_nets = set()
+        for p in cons.get("pins") or []:
+            name = (p.get("name") or "").strip().upper()
+            if name in _OUT_PIN_NAMES:
+                net = comp.pins.get(str(p.get("number")))
+                if net:
+                    out_nets.add(net)
+        # Multi-output part (or an ambiguous pin table): we cannot tell which rail
+        # `vout` describes. Skip rather than pick one.
+        if len(out_nets) != 1:
+            continue
+
+        net = g.nets.get(out_nets.pop())
+        if net is None or net.voltage is not None:
+            continue
+        net.voltage = float(vout)
+        net.voltage_source = "vout"
+        if net.kind == "signal":
+            net.kind = "power"          # a regulated output is a rail, whatever it's called
+        resolved += 1
+    return resolved
 
 
 def build(sch: str | Path) -> DesignGraph:

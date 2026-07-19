@@ -53,8 +53,9 @@ def _cap_rating(comp: graphmod.Component,
 def _operating_voltage(g: graphmod.DesignGraph,
                        comp: graphmod.Component) -> tuple[float | None, str]:
     """Worst-case DC across the cap from known net voltages: (volts | None, detail)."""
+    nets = set(comp.pins.values())
     known: list[tuple[str, float]] = []
-    for net_name in set(comp.pins.values()):
+    for net_name in nets:
         v = g.rail_voltage(net_name)
         if v is not None:
             known.append((net_name, v))
@@ -64,6 +65,12 @@ def _operating_voltage(g: graphmod.DesignGraph,
         # One known rail, other side unknown — assume the far side can sit at 0 V
         # (worst plausible case for a rail-connected cap; still conservative).
         name, v = known[0]
+        if v == 0.0 and len(nets) > 1:
+            # ...but the *known* side is ground and the rail is the unknown one. The
+            # "far side sits at 0 V" reasoning inverts here and would report 0 V across
+            # the part — a silent pass for a cap that may be sitting on a 20 V rail.
+            # Unknown is unknown: skip.
+            return None, ""
         return abs(v), name
     vmax = max(known, key=lambda kv: kv[1])
     vmin = min(known, key=lambda kv: kv[1])
@@ -129,7 +136,9 @@ def run(args) -> int:
     if not sch or not Path(sch).exists():
         sys.exit(f"error: schematic not found: {sch}")
     g = graphmod.build(sch)
-    return render_and_exit(check(g, factors_from_cfg(cfg), _lookup(cfg)))
+    lookup = _lookup(cfg)
+    graphmod.solve_rail_voltages(g, lookup)
+    return render_and_exit(check(g, factors_from_cfg(cfg), lookup))
 
 
 def _lookup(cfg: cfgmod.Config) -> ConstraintsLookup:

@@ -79,6 +79,34 @@ def test_cap_constraints_lookup_preferred():
     assert res.n_errors == 1   # 5V across an extracted 4V rating
 
 
+def test_cap_on_unknown_rail_is_skipped_not_evaluated_at_zero():
+    """A cap between GND and an *unknown* rail must skip, not report 0 V across it.
+
+    Regression: the single-known-net branch assumed the far side sits at 0 V, which
+    inverts when the known side IS ground — a 10 uF/25 V part on an unnamed 18 V rail
+    was silently passing as "0 V across a 25 V part".
+    """
+    g = make_graph(
+        {"VGH": ["C1.1"], "GND": ["C1.2"]},          # VGH asserts no voltage
+        [{"reference": "C1", "value": "1uF 50V X7R", "mpn": ""}],
+    )
+    op, source = cap_derating._operating_voltage(g, g.components["C1"])
+    assert op is None and source == ""
+    res = cap_derating.check(g)
+    assert res.n_errors == 0
+    assert "1 without a known net voltage" in " ".join(f.message for f in res.findings)
+
+
+def test_cap_on_known_rail_still_assumes_zero_far_side():
+    """The original reasoning is untouched when the *known* side is a real rail."""
+    g = make_graph(
+        {"+5V": ["C1.1"], "SOME_SIGNAL": ["C1.2"]},
+        [{"reference": "C1", "value": "1uF 16V X7R", "mpn": ""}],
+    )
+    op, source = cap_derating._operating_voltage(g, g.components["C1"])
+    assert op == 5.0 and source == "+5V"
+
+
 # ---------------------------------------------------------------------------
 # led-current
 # ---------------------------------------------------------------------------

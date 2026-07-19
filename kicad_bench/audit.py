@@ -82,6 +82,7 @@ def run_all(cfg: cfgmod.Config) -> list[tuple[str, Result]]:
     g = graphmod.build_from(counts, pin_net, comps)
     from .core import conspec
     lookup = conspec.lookup(cfg)
+    graphmod.solve_rail_voltages(g, lookup)
     out.append(("Datasheet checks",
                 cap_derating.check(g, cap_derating.factors_from_cfg(cfg), lookup)))
     out.append(("Datasheet checks", led_current.check(g, lookup=lookup)))
